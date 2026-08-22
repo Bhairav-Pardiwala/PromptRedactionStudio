@@ -111,14 +111,17 @@ DEFAULT_ENTITIES = [
     "US_SSN",
 ]
 
+# Deliberately unmistakable placeholders: Jane Doe / John Roe, the IANA-reserved
+# example.com domain, the standard 4111... Visa test card, and a private-range IP.
+# Nothing here can be confused for a real person's data.
 SAMPLE_PROMPT = (
     "Hi, I need help drafting a reply to a customer complaint.\n\n"
-    "The customer is Marcus Delgado, reachable at marcus.delgado@northwind-retail.com "
-    "or on +1 (415) 555-0182. He lives in Portland, Oregon and has been a member since "
-    "March 3rd, 2019. His account reference is ACME-99120 and the card he used was "
-    "4111 1111 1111 1111.\n\n"
-    "He says a payment of $340 was taken twice on 12/04/2024. Our support agent Priya "
-    "Raghunathan already looked into it and confirmed the duplicate charge came from our "
+    "The customer is Jane Doe, reachable at jane.doe@example.com "
+    "or on +1 (415) 555-0182. They live in Portland, Oregon and have been a member "
+    "since March 3rd, 2019. Their account reference is ACME-99120 and the card they "
+    "used was 4111 1111 1111 1111.\n\n"
+    "They say a payment of $340 was taken twice on 12/04/2024. Our support agent John "
+    "Roe already looked into it and confirmed the duplicate charge came from our "
     "billing service at 10.42.18.7. Please draft a polite apology explaining the refund "
     "will take 5 working days."
 )
