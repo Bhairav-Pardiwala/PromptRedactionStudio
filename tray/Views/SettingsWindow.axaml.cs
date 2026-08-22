@@ -37,7 +37,10 @@ public partial class SettingsWindow : Window
         CancelButton.Click += (_, _) => Close();
     }
 
-    private void InitializeComponent() => AvaloniaXamlLoader.Load(this);
+    // No hand-written InitializeComponent here on purpose. Avalonia's name generator emits
+    // one that loads the XAML *and* assigns the x:Name'd fields (UrlBox, KeyBox, ...).
+    // Declaring another that only calls AvaloniaXamlLoader.Load shadows it, leaving every
+    // control null -- which is what made opening Settings throw and take the app down.
 
     /// <summary>
     /// Validate against the real instance. A wrong URL must fail here, loudly, rather than

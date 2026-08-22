@@ -57,6 +57,13 @@ public partial class App : Application
 
             _ = RefreshStatusAsync();
             StartHealthPolling();
+
+            // Lets the Settings window be opened without a mouse, for diagnosis on a
+            // machine where the tray menu cannot be clicked.
+            if (Environment.GetEnvironmentVariable("PRT_OPEN_SETTINGS") == "1")
+            {
+                Dispatcher.UIThread.Post(ShowSettings);
+            }
         }
 
         base.OnFrameworkInitializationCompleted();
@@ -296,16 +303,27 @@ public partial class App : Application
 
     private void ShowSettings()
     {
-        var window = new SettingsWindow(_settings, _client);
-        window.Saved += () =>
+        // A throw here would otherwise reach the UI thread unhandled and kill the whole
+        // app -- taking the tray icon and both hotkeys with it, from one menu click.
+        try
         {
-            _settings.Save();
-            _policy = null;   // re-fetch against whatever instance is configured now
-            ApplySettings();
-            _ = RefreshStatusAsync();
-        };
-        window.Show();
-        window.Activate();
+            var window = new SettingsWindow(_settings, _client);
+            window.Saved += () =>
+            {
+                _settings.Save();
+                _policy = null;   // re-fetch against whatever instance is configured now
+                ApplySettings();
+                _ = RefreshStatusAsync();
+            };
+            window.Show();
+            window.Activate();
+            Log.Write("Settings window opened");
+        }
+        catch (Exception exc)
+        {
+            Log.Write("Settings window FAILED: " + exc);
+            ShowToast("Could not open Settings", exc.Message, isError: true);
+        }
     }
 
     private void OpenWebUi()

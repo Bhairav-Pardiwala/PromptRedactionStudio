@@ -225,11 +225,14 @@ same value in the tray app's Settings. Leaving it unset disables the check entir
 ### Troubleshooting
 
 The app has no console, so it writes to `%APPDATA%\PromptRedactionTray\log.txt`: hotkey
-registration, whether a hotkey matched, and why a redaction failed. It records events only
-— never clipboard contents, never a token mapping.
+registration, whether a hotkey matched, why a redaction failed, and any unhandled
+exception. It records events only — never clipboard contents, never a token mapping.
 
 If a redaction fails the clipboard is deliberately left untouched, rather than cleared or
 half-processed.
+
+If the tray icon is hidden in Windows' notification overflow and you cannot reach the menu,
+start the app with `PRT_OPEN_SETTINGS=1` to open Settings directly.
 
 ---
 

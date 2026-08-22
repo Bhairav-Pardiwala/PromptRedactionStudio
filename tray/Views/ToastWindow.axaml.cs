@@ -22,10 +22,10 @@ public partial class ToastWindow : Window
 
     public ToastWindow()
     {
+        // InitializeComponent comes from Avalonia's name generator; declaring one here
+        // would shadow it and leave every x:Name'd control null. See NoShadowedInitializeComponent.
         InitializeComponent();
     }
-
-    private void InitializeComponent() => AvaloniaXamlLoader.Load(this);
 
     public static void Show(string title, string body, bool isError = false)
     {

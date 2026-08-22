@@ -20,9 +20,24 @@ internal static class Program
             return;
         }
 
+        // With no console, an unhandled exception would otherwise vanish silently and the
+        // tray icon would just disappear. Log it so there is something to diagnose from.
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+            Services.Log.Write("FATAL unhandled: " + e.ExceptionObject);
+        System.Threading.Tasks.TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            Services.Log.Write("Unobserved task exception: " + e.Exception);
+            e.SetObserved();
+        };
+
         try
         {
             BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+        }
+        catch (Exception exc)
+        {
+            Services.Log.Write("FATAL during startup or run: " + exc);
+            throw;
         }
         finally
         {
