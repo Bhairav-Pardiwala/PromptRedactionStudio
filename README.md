@@ -7,13 +7,16 @@ Paste the prompt you were about to send to a model. PII is highlighted in place 
 you get a redacted version to copy, and when the model replies you can paste the answer back
 and restore the real values.
 
+![The web UI detecting personal data in a prompt, with the options panel on the left and scored findings on the right](docs/web-ui-detection.png)
+
 The surrounding options panel exposes Presidio's actual configuration surface — NLP engine,
 78 entity types, confidence threshold, seven anonymization operators, allow-lists and custom
 recognizers — so you can see what each setting does to your text.
 
-> All names, addresses, card numbers and IDs used in the sample prompt and the tests are
-> **synthetic**. `4111 1111 1111 1111` is the standard Visa test number; the people and
-> companies are invented. No real personal data is in this repository.
+> All names, addresses, card numbers and IDs in the sample prompt, the tests and the
+> screenshots are **synthetic**. `4111 1111 1111 1111` is the standard Visa test number,
+> `example.com` and `192.0.2.x` are reserved for documentation, and the people and companies
+> are invented. No real personal data is in this repository.
 
 ---
 
@@ -137,6 +140,12 @@ to come back mangled — placeholders survive the round trip far more reliably.
 2. Send the redacted prompt to any model.
 3. Paste the reply into the restore box. Real values go back in.
 
+![The restore panel putting real values back into a model's JSON reply, reporting 18 of 18 tokens restored](docs/web-ui-restore.png)
+
+Above, a model answered the redacted prompt with structured JSON that carried the tokens
+through — `<PERSON_3>`, `PC-<PHONE_NUMBER_2>` — and all 18 came back. The model never saw a
+real name, address or phone number.
+
 Presidio's `DeanonymizeEngine` needs span offsets matching the text being restored — true
 for the redacted prompt, but not for a model's reply, which is different text. Since the
 reply is the case that matters, `restore()` locates each token in the incoming text first
@@ -167,6 +176,12 @@ operates on the clipboard rather than on a specific website's DOM.
 
 Your organisation runs one instance of the server (the Docker image above), and each
 employee points the tray app at it. One client, many backends.
+
+![The desktop Settings window: instance URL, optional API key, a Test connection button, hotkey bindings and start-at-sign-in](docs/desktop-settings.png)
+
+**Test connection** validates against the real instance before anything depends on it — a
+wrong URL should fail here, visibly, rather than silently at the moment someone presses the
+hotkey expecting to be protected.
 
 ```powershell
 cd tray
