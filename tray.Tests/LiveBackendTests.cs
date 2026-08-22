@@ -111,6 +111,38 @@ public class LiveBackendTests
     }
 
     [Fact]
+    public async Task Applied_count_reflects_replacements_not_overlapping_findings()
+    {
+        var client = await TryConnectAsync();
+        if (client is null)
+        {
+            return;
+        }
+
+        using (client)
+        {
+            // An email address also matches the URL recognizer, so the analyzer reports
+            // more findings than the anonymizer ends up applying. The toast must report
+            // the latter, or it tells the user more changed than actually did.
+            const string text = "Escalation from Jane Doe, jane.doe@example.com, +1 (415) 555-0182.";
+
+            var policy = await client.GetPolicyAsync();
+            var result = await client.RedactAsync(text, policy);
+
+            Assert.NotEmpty(result.Items);
+            Assert.True(
+                result.AppliedCount <= result.Findings.Count,
+                "applied replacements cannot exceed raw findings");
+
+            // Every entity type named in the summary must really appear in the output.
+            foreach (var item in result.Items)
+            {
+                Assert.Contains(item.Text, result.RedactedText, StringComparison.Ordinal);
+            }
+        }
+    }
+
+    [Fact]
     public async Task An_unreachable_instance_reports_cleanly_rather_than_throwing()
     {
         using var client = new RedactionClient { BaseUrl = "http://127.0.0.1:59999" };

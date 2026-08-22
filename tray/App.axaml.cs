@@ -162,7 +162,7 @@ public partial class App : Application
 
             // Write only after a successful call: a failed redaction must never leave the
             // clipboard empty or half-processed.
-            Log.Write("Redacted: " + result.FindingCount + " finding(s), " + result.Mapping.Count + " token(s)");
+            Log.Write("Redacted: " + result.AppliedCount + " replacement(s) from " + result.Findings.Count + " finding(s), " + result.Mapping.Count + " token(s)");
             if (!await _clipboard.SetTextAsync(result.RedactedText))
             {
                 Log.Write("Clipboard write FAILED");
@@ -171,22 +171,28 @@ public partial class App : Application
             }
 
             Log.Write("Clipboard updated");
-            if (result.FindingCount == 0)
+            if (result.AppliedCount == 0)
             {
                 ShowToast("Nothing detected", "The text was left unchanged.");
                 return;
             }
 
-            var summary = string.Join(
-                ", ",
-                result.Findings
-                    .GroupBy(f => f.EntityType)
-                    .OrderByDescending(g => g.Count())
-                    .Take(4)
-                    .Select(g => g.Count() + "x " + g.Key));
+            // Summarise what was actually replaced, not what was merely detected. The
+            // analyzer reports overlapping spans (an email also matches URL), and the
+            // anonymizer merges those away before rewriting.
+            var groups = result.Items
+                .GroupBy(item => item.EntityType)
+                .OrderByDescending(g => g.Count())
+                .ToList();
+
+            var summary = string.Join(", ", groups.Take(4).Select(g => g.Count() + "x " + g.Key));
+            if (groups.Count > 4)
+            {
+                summary += " +" + (groups.Count - 4) + " more";
+            }
 
             ShowToast(
-                "Redacted " + result.FindingCount + " item(s)",
+                "Redacted " + result.AppliedCount + " item(s)",
                 summary + "\nPaste anywhere; press " + _settings.RestoreHotkey + " to restore.");
         }
         catch (RedactionClientException exc)

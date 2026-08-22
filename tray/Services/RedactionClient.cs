@@ -191,12 +191,32 @@ public sealed class RedactResponse
     public string? SessionId { get; set; }
     public string OriginalText { get; set; } = string.Empty;
     public string RedactedText { get; set; } = string.Empty;
+
+    /// <summary>Everything the analyzer detected, including spans that overlap.</summary>
     public List<Finding> Findings { get; set; } = new();
+
+    /// <summary>The replacements actually applied, after Presidio resolved overlaps.</summary>
+    public List<AppliedItem> Items { get; set; } = new();
+
     public Dictionary<string, string> Mapping { get; set; } = new();
     public bool Reversible { get; set; }
 
+    /// <summary>
+    /// How many replacements the text actually received.
+    ///
+    /// Deliberately not Findings.Count: the analyzer reports overlapping spans (an email
+    /// address also matches the URL recognizer), and the anonymizer merges those before
+    /// rewriting. Reporting findings would tell the user six things changed when four did.
+    /// </summary>
     [JsonIgnore]
-    public int FindingCount => Findings.Count;
+    public int AppliedCount => Items.Count;
+}
+
+public sealed class AppliedItem
+{
+    public string EntityType { get; set; } = string.Empty;
+    public string Text { get; set; } = string.Empty;
+    public string Operator { get; set; } = string.Empty;
 }
 
 public sealed class Finding
