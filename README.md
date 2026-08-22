@@ -1,26 +1,24 @@
 # Prompt Redaction Studio
 
-A local web app for stripping PII out of LLM prompts with
-[Microsoft Presidio](https://github.com/microsoft/presidio) — and putting it back afterwards.
-
-Paste the prompt you were about to send to a model. PII is highlighted in place as you type,
-you get a redacted version to copy, and when the model replies you can paste the answer back
-and restore the real values.
+Strip PII out of LLM prompts with [Microsoft Presidio](https://github.com/microsoft/presidio),
+then put it back afterwards. Runs entirely on your machine — no LLM is called and nothing
+you paste leaves the box.
 
 ![The web UI detecting personal data in a prompt, with the options panel on the left and scored findings on the right](docs/web-ui-detection.png)
 
-The surrounding options panel exposes Presidio's actual configuration surface — NLP engine,
-78 entity types, confidence threshold, seven anonymization operators, allow-lists and custom
-recognizers — so you can see what each setting does to your text.
+Paste a prompt, get a redacted version to copy, send it to any model, then paste the reply
+back to restore the real values. A desktop tray app does the same on the clipboard from any
+application, via a hotkey.
 
-> All names, addresses, card numbers and IDs in the sample prompt, the tests and the
-> screenshots are **synthetic**. `4111 1111 1111 1111` is the standard Visa test number,
-> `example.com` and `192.0.2.x` are reserved for documentation, and the people and companies
-> are invented. No real personal data is in this repository.
+📖 **[Full guide](docs/GUIDE.md)** — every option explained, API reference, org deployment,
+how the restore round trip works.
+
+> All names, cards and IDs in the sample prompt, tests and screenshots are **synthetic**.
+> No real personal data is in this repository.
 
 ---
 
-## Quick start
+## Install and run
 
 Requires **Python 3.10–3.14** (Presidio's supported range), or just Docker.
 
@@ -33,12 +31,8 @@ docker run --rm -p 8000:8000 prompt-redaction
 
 Or `docker compose up --build`. Then open <http://localhost:8000>.
 
-The default image is ~1.6 GB because it bakes in both spaCy models. For a much smaller
-image with only `en_core_web_sm` (weaker name and place detection):
-
-```bash
-docker build --build-arg INCLUDE_LARGE_MODEL=false -t prompt-redaction:slim .
-```
+The image is ~1.6 GB because it bakes in both spaCy models. Add
+`--build-arg INCLUDE_LARGE_MODEL=false` for a slim image with only `en_core_web_sm`.
 
 ### Windows (PowerShell)
 
@@ -47,14 +41,9 @@ docker build --build-arg INCLUDE_LARGE_MODEL=false -t prompt-redaction:slim .
 .\run.ps1          # http://localhost:8000
 ```
 
-```powershell
-.\setup.ps1 -SkipLargeModel     # small model only, ~12 MB, faster setup
-.\setup.ps1 -WithTransformers   # adds torch + the transformers NER engine, ~2 GB
-.\run.ps1 -Port 9000
-```
-
-> `setup.ps1` uses the `py` launcher rather than `python`, so it picks a supported
-> interpreter even when an older Python is first on `PATH`.
+Useful flags: `.\setup.ps1 -SkipLargeModel` (small model only, ~12 MB),
+`.\setup.ps1 -WithTransformers` (adds the transformers NER engine, ~2 GB),
+`.\run.ps1 -Port 9000`.
 
 ### macOS and Linux
 
@@ -67,246 +56,92 @@ python -m spacy download en_core_web_lg      # ~590 MB, optional but recommended
 uvicorn app.main:app --port 8000 --reload
 ```
 
-For the transformers engine, additionally:
-
-```bash
-pip install torch --index-url https://download.pytorch.org/whl/cpu
-pip install "presidio-analyzer[transformers]"
-```
-
 Any model you skip simply shows as unavailable in the UI, with the install command
 alongside it.
 
 ---
 
-## What you can control
+## Sample run
 
-### NLP engine
+### In the browser
 
-| Engine | Model | Notes |
-|---|---|---|
-| spaCy small | `en_core_web_sm` | ~12 MB, fastest. Misses more names and places. |
-| spaCy large | `en_core_web_lg` | Presidio's documented default. Best all-round accuracy. |
-| Transformers | `StanfordAIMI/stanford-deidentifier-base` | Highest recall, slowest. Opt-in. |
-
-Engines build on first use and are cached. Any engine whose model isn't installed shows as
-unavailable in the UI with the command to install it, rather than failing mid-request.
-
-### Anonymization operators
-
-Chosen globally, or per entity type — set PERSON to `mask` while everything else uses
-placeholders.
-
-| Operator | What it does | Reversible |
-|---|---|---|
-| **Numbered placeholder** | `<PERSON_1>`, `<EMAIL_ADDRESS_1>`, … | **yes** |
-| Replace | Fixed text, defaulting to `<ENTITY_TYPE>` | no |
-| Redact | Deletes the value | no |
-| Mask | `****@example.com` — configurable char, count, direction | no |
-| Hash | SHA-256 or SHA-512 digest | no |
-| Encrypt | AES with a 16/24/32-character key | **yes** |
-| Keep | Detects but doesn't change the text | n/a |
-
-**Numbered placeholder** is the default and is the one built for this job. It's the only
-addition to Presidio's built-in set, implemented on Presidio's own `custom` operator: each
-distinct value gets a stable numbered token, so a prompt mentioning the same person five
-times stays internally consistent, and the model's reply stays readable enough to reason
-about. Tokens are numbered in reading order.
-
-Encryption is reversible too, but its base64 ciphertext reads as noise to a model and tends
-to come back mangled — placeholders survive the round trip far more reliably.
-
-### Detection settings
-
-- **78 entity types**, grouped by region (Common, US, UK, India, Europe, Rest of world).
-  The default selection is the 19 types Presidio itself loads out of the box; the country
-  packs are one click away.
-- **Confidence threshold** — a slider over `score_threshold`.
-- **Allow-list** — terms never redacted, with exact or fuzzy matching.
-- **Custom recognizers** — your own entity types from a regex or a deny-list, passed as
-  `ad_hoc_recognizers` so the shared engine is never mutated.
-- **Detect ORGANIZATION** — Presidio suppresses `ORG` by default because it produces many
-  false positives. This toggle makes that visible rather than mysterious.
-- **Explanations** — `return_decision_process`, surfacing which recognizer fired, the
-  pattern it matched, checksum results and context-word score boosts. Hover any row in the
-  findings table.
-
----
-
-## The restore round trip
-
-1. Redact the prompt. Real values are swapped for tokens and a mapping is held server-side
-   under a random session id.
-2. Send the redacted prompt to any model.
-3. Paste the reply into the restore box. Real values go back in.
+1. Open <http://localhost:8000>. The box is pre-filled with a sample prompt — findings
+   appear as you type, highlighted in place and listed with their confidence scores.
+2. Click **Redact**. Each distinct value becomes a numbered token: `<PERSON_1>`,
+   `<EMAIL_ADDRESS_1>`. The same person mentioned five times keeps the same token.
+3. Copy the redacted prompt, send it to a model, and paste its reply into the **restore**
+   box. Real values go back in, and you're told how many tokens came back.
 
 ![The restore panel putting real values back into a model's JSON reply, reporting 18 of 18 tokens restored](docs/web-ui-restore.png)
 
-Above, a model answered the redacted prompt with structured JSON that carried the tokens
-through — `<PERSON_3>`, `PC-<PHONE_NUMBER_2>` — and all 18 came back. The model never saw a
-real name, address or phone number.
-
-Presidio's `DeanonymizeEngine` needs span offsets matching the text being restored — true
-for the redacted prompt, but not for a model's reply, which is different text. Since the
-reply is the case that matters, `restore()` locates each token in the incoming text first
-and rebuilds the spans at those offsets before handing off to Presidio. Tokens the model
-didn't repeat are reported as not-found rather than silently skipped.
-
-### A note on the mapping
-
-The token-to-original mapping is the key that undoes the redaction. It is kept **in memory
-only**, keyed by a random session id, expires after an hour, and is never written to disk.
-"Clear stored mappings" under Advanced drops them all immediately. Nothing in this app sends
-your prompt anywhere — Presidio runs locally, and no LLM is called.
-
----
-
-## Desktop app: redact from anywhere
-
-The web UI is fine for exploring options, but copy-pasting into a browser tab before every
-prompt is friction nobody sustains. `tray/` is an Avalonia desktop client that removes it:
-
-**Copy text in any app → press Ctrl+Alt+R → paste redacted.**
-
-Press **Ctrl+Alt+U** on the model's reply to put the real values back. It works in every
-application — ChatGPT, Claude, Slack, Outlook, an internal ticket system — because it
-operates on the clipboard rather than on a specific website's DOM.
-
-### How it is meant to be deployed
-
-Your organisation runs one instance of the server (the Docker image above), and each
-employee points the tray app at it. One client, many backends.
-
-![The desktop Settings window: instance URL, optional API key, a Test connection button, hotkey bindings and start-at-sign-in](docs/desktop-settings.png)
-
-**Test connection** validates against the real instance before anything depends on it — a
-wrong URL should fail here, visibly, rather than silently at the moment someone presses the
-hotkey expecting to be protected.
-
-```powershell
-cd tray
-dotnet run          # development
-
-dotnet publish -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -o ../dist
-```
-
-That produces a single ~97 MB executable with no runtime to install. Swap `win-x64` for
-`linux-x64` or `osx-arm64` to build for other platforms. Releases build automatically on
-tag push via `.github/workflows/release.yml`, with SHA-256 checksums and build provenance
-attestations attached.
-
-> **Windows SmartScreen:** the published binaries are not code-signed, so Windows warns on
-> first run and you must choose *More info → Run anyway*. In a managed rollout employees
-> never see this, because IT redistributes the binary through its own deployment tooling.
-
-### The client keeps the key, not the server
-
-Every request the tray app makes passes `store_session: false`. The server analyses the
-text, returns the redacted version **and the token mapping**, and retains nothing. The
-mapping lives in memory in the client, expires after an hour, and is never written to disk.
-
-That matters for a shared instance: no accumulating store of everyone's real values,
-nothing for an unauthenticated `/api/restore` to hand back, and no session state to scale
-across workers. Restoring is instant and needs no network call.
-
-### Central policy
-
-Clients fetch redaction settings from `GET /api/policy` rather than shipping their own
-defaults, so redaction behaviour is an organisational decision rather than a per-employee
-preference. Point `REDACTION_POLICY_FILE` at a YAML file to set it:
-
-```yaml
-locked: true
-score_threshold: 0.4
-entities: [PERSON, EMAIL_ADDRESS, PHONE_NUMBER, CREDIT_CARD, US_SSN]
-default_operator:
-  type: placeholder
-per_entity_operators:
-  CREDIT_CARD:
-    type: hash
-    params: { hash_type: sha256 }
-allow_list: [Acme Corp]
-```
-
-Anything omitted keeps its default, so an instance with no policy file behaves exactly as
-it always did.
-
-### Authentication
-
-By default there is none — the instance is expected to sit on a trusted network. Set
-`REDACTION_API_KEY` on the server to require an `X-Redaction-Key` header, and enter the
-same value in the tray app's Settings. Leaving it unset disables the check entirely.
-
-### Troubleshooting
-
-The app has no console, so it writes to `%APPDATA%\PromptRedactionTray\log.txt`: hotkey
-registration, whether a hotkey matched, why a redaction failed, and any unhandled
-exception. It records events only — never clipboard contents, never a token mapping.
-
-If a redaction fails the clipboard is deliberately left untouched, rather than cleared or
-half-processed.
-
-If the tray icon is hidden in Windows' notification overflow and you cannot reach the menu,
-start the app with `PRT_OPEN_SETTINGS=1` to open Settings directly.
-
----
-
-## API
-
-The UI is a thin client over a JSON API; every option above is available directly.
-
-| Route | Purpose |
-|---|---|
-| `GET /api/config` | engines and availability, entity groups, operator specs, sample prompt |
-| `GET /api/policy` | the redaction settings this instance wants clients to use |
-| `POST /api/analyze` | detections only — type, offsets, score, explanation |
-| `POST /api/redact` | analyze + anonymize — redacted text, token map, session id |
-| `POST /api/restore` | put real values back into text containing tokens |
-| `POST /api/sessions/clear` | drop every stored mapping |
-| `GET /api/health` | liveness, which engines are warm |
-
-`POST /api/redact` accepts `store_session` (default `true`). Pass `false` and the server
-keeps nothing: `session_id` comes back `null`, but the full `mapping` is still returned so
-the caller can restore locally. That is what the desktop client uses.
-
-Interactive docs at `http://localhost:8000/docs`.
+### Against the API
 
 ```bash
 curl -X POST http://localhost:8000/api/redact \
   -H "Content-Type: application/json" \
-  -d '{"text":"Email Dana at dana@example.com","engine":"spacy_lg",
-       "default_operator":{"type":"placeholder","params":{}}}'
+  -d '{"text":"Email Dana Whitfield at dana.whitfield@example.com or call +1 415 555 0132.",
+       "engine":"spacy_lg","default_operator":{"type":"placeholder","params":{}}}'
 ```
+
+```json
+{
+  "session_id": "wItW2Byi5zAf9FpVbVLAsw",
+  "redacted_text": "Email <PERSON_1> at <EMAIL_ADDRESS_1> or call <PHONE_NUMBER_1>.",
+  "mapping": {
+    "<PERSON_1>": "Dana Whitfield",
+    "<EMAIL_ADDRESS_1>": "dana.whitfield@example.com",
+    "<PHONE_NUMBER_1>": "+1 415 555 0132"
+  },
+  "reversible": true,
+  "engine": "spacy_lg"
+}
+```
+
+Send `redacted_text` to a model, then restore whatever it says back — the reply is different
+text from the prompt, and tokens it repeated are found wherever they landed:
+
+```bash
+curl -X POST http://localhost:8000/api/restore \
+  -H "Content-Type: application/json" \
+  -d '{"text":"I have drafted a note to <PERSON_1>; confirm <EMAIL_ADDRESS_1> is correct.",
+       "session_id":"wItW2Byi5zAf9FpVbVLAsw"}'
+```
+
+```json
+{
+  "restored_text": "I have drafted a note to Dana Whitfield; confirm dana.whitfield@example.com is correct.",
+  "tokens_restored": 2,
+  "tokens_total": 3,
+  "not_found": ["<PHONE_NUMBER_1>"]
+}
+```
+
+The model never repeated the phone number, so it's reported in `not_found` rather than
+silently dropped. Interactive docs for every route are at <http://localhost:8000/docs>; the
+full route table is in the [guide](docs/GUIDE.md#api).
 
 ---
 
-## Layout
+## Desktop app
 
-```
-Dockerfile        both spaCy models baked in; INCLUDE_LARGE_MODEL=false for a slim build
-docker-compose.yml
-setup.ps1 / run.ps1   Windows convenience scripts
-app/
-  main.py         FastAPI routes, entity grouping, sample prompt
-  engines.py      lazy cached engine registry; loads all 78 predefined recognizers
-  operators.py    UI operator specs -> Presidio OperatorConfig; placeholder allocator
-  recognizers.py  ad-hoc regex / deny-list recognizers
-  redaction.py    analyze -> anonymize -> restore, plus the TTL session store
-  policy.py       central IT-defined redaction policy, from REDACTION_POLICY_FILE
-  schemas.py      pydantic request/response models
-  static/         index.html, styles.css, app.js  (no build step)
-tray/             Avalonia desktop client
-  App.axaml.cs    tray icon, hotkey wiring, the redact and restore flows
-  Services/       RedactionClient, MappingStore, HotkeyService, ClipboardService
-  Views/          SettingsWindow, ToastWindow
-tests/test_api.py 38 tests over the API
-tray.Tests/       25 tests over the client logic
+**Copy text in any app → press Ctrl+Alt+R → paste redacted.** Press **Ctrl+Alt+U** on the
+model's reply to put the real values back. It works everywhere — ChatGPT, Claude, Slack,
+Outlook — because it operates on the clipboard, not on a website's DOM.
+
+```powershell
+cd tray
+dotnet run          # development
+dotnet publish -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -o ../dist
 ```
 
-`AnalyzerEngine`'s default registry loads only ~17 recognizers (19 entity types).
-Presidio ships many more as classes — the country packs for India, Germany, Korea, Spain
-and others — which `engines.build_registry()` registers explicitly, taking coverage to 78
-entity types.
+That produces a single ~97 MB executable with no runtime to install; swap `win-x64` for
+`linux-x64` or `osx-arm64`. Point it at your server's URL in Settings and press **Test
+connection**.
+
+Org deployment, central policy and the API key are covered in the
+[guide](docs/GUIDE.md#desktop-app-deployment).
+
+---
 
 ## Tests
 
@@ -317,18 +152,7 @@ dotnet test tray.Tests                             # 25 desktop client tests
 
 On macOS or Linux, `python -m pytest tests/ -v` inside the activated venv.
 
-The backend suite covers every operator, the placeholder round trip (including against a
-reworded reply that reorders the tokens), encrypt/decrypt, custom recognizers, allow-lists,
-thresholds, explanations, the stateless `store_session: false` path, policy loading, the
-optional API key, and that malformed input returns a clean 4xx rather than a stack trace.
-
-The client suite covers token restoration — repeated tokens, reordered replies, the
-`<PERSON_10>` vs `<PERSON_1>` prefix trap, collisions between separate redactions, and TTL
-expiry — plus hotkey parsing and matching.
-
-`tray.Tests` also contains live tests that run against a real instance and skip themselves
-when none is reachable. Set `REDACTION_TEST_REQUIRE=1` to make them fail instead of skip,
-which is what you want in CI or when verifying by hand.
+---
 
 ## How this was built, and why there's no live demo
 
@@ -336,9 +160,9 @@ I vibe coded this — built it quickly with an AI assistant rather than hand-wri
 reviewing every line myself. It works, and the test suite covers the behaviour that matters,
 but I haven't audited it the way I would something I was putting in front of real users.
 
-That's also why I haven't put it online. This is a tool for handling Personal Information: a hosted instance
-would mean strangers pasting real names, card numbers and medical details into a server I
-haven't hardened or reviewed properly — and I'd rather not be responsible for that.
+That's also why I haven't put it online. This is a tool for handling personal information: a
+hosted instance would mean strangers pasting real names, card numbers and medical details
+into a server hosted by me which i would not want and would defeat the purpose of this app!.
 
 Run it locally, or on a server you own and have hardened yourself. That's the safer answer
 anyway, and rather the point of the app: Presidio runs on your own infrastructure, no LLM is
