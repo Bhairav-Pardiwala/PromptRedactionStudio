@@ -181,9 +181,17 @@ def redact(
     text: str,
     default_operator: Optional[Dict[str, Any]] = None,
     per_entity_operators: Optional[Dict[str, Dict[str, Any]]] = None,
+    store_session: bool = True,
     **analyze_kwargs: Any,
 ) -> Dict[str, Any]:
-    """Analyze then anonymize, returning the redacted text plus a reversal session."""
+    """Analyze then anonymize, returning the redacted text and the token mapping.
+
+    When `store_session` is false nothing is retained server-side: no session is created
+    and `session_id` comes back as None. The caller still receives the full `mapping`, so
+    desktop and extension clients can restore locally without the server ever holding the
+    key to the redaction. The web UI passes true because its restore box relies on the
+    server remembering.
+    """
     findings, results = analyze(text, **analyze_kwargs)
 
     detected_types = []
@@ -196,9 +204,9 @@ def redact(
     )
 
     if not results:
-        session = store.create()
+        session = store.create() if store_session else None
         return {
-            "session_id": session.session_id,
+            "session_id": session.session_id if session else None,
             "original_text": text,
             "redacted_text": text,
             "findings": findings,
@@ -237,15 +245,17 @@ def redact(
 
     encrypt_keys = operators.encrypt_keys_in_use(default_operator, per_entity_operators)
 
-    session = store.create()
-    session.placeholder_map = mapping
-    session.encrypted_spans = encrypted_spans
-    session.encrypt_keys = encrypt_keys
+    session = None
+    if store_session:
+        session = store.create()
+        session.placeholder_map = mapping
+        session.encrypted_spans = encrypted_spans
+        session.encrypt_keys = encrypt_keys
 
     reversible = bool(mapping or encrypted_spans) or not findings
 
     return {
-        "session_id": session.session_id,
+        "session_id": session.session_id if session else None,
         "original_text": text,
         "redacted_text": redacted_text,
         "findings": findings,

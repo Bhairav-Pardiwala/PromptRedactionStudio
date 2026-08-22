@@ -6,15 +6,17 @@ Serves both the JSON API and the static single-page frontend from one process.
 from __future__ import annotations
 
 import logging
+import os
+import secrets
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from presidio_anonymizer.entities import InvalidParamError
 
-from . import engines, operators, recognizers, redaction, schemas
+from . import engines, operators, policy, recognizers, redaction, schemas
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("prompt_redaction")
@@ -127,6 +129,28 @@ SAMPLE_PROMPT = (
 )
 
 
+API_KEY_ENV = "REDACTION_API_KEY"
+API_KEY_HEADER = "X-Redaction-Key"
+
+
+def require_api_key(x_redaction_key: Optional[str] = Header(default=None)) -> None:
+    """Check the shared key, but only when one is configured.
+
+    Deployments on a trusted network leave REDACTION_API_KEY unset and this is a no-op.
+    Setting it turns on the check everywhere at once, with no client change beyond
+    sending the header.
+    """
+    expected = os.environ.get(API_KEY_ENV)
+    if not expected:
+        return
+    # Constant-time compare so the endpoint cannot be used as a timing oracle.
+    if not x_redaction_key or not secrets.compare_digest(x_redaction_key, expected):
+        raise HTTPException(
+            status_code=401,
+            detail="Missing or invalid " + API_KEY_HEADER + " header.",
+        )
+
+
 def _http_error(exc: Exception, status: int = 400) -> HTTPException:
     return HTTPException(status_code=status, detail=str(exc))
 
@@ -207,7 +231,7 @@ def get_config() -> Dict[str, Any]:
     }
 
 
-@app.post("/api/analyze", response_model=schemas.AnalyzeResponse)
+@app.post("/api/analyze", response_model=schemas.AnalyzeResponse, dependencies=[Depends(require_api_key)])
 def post_analyze(request: schemas.AnalyzeRequest) -> Dict[str, Any]:
     try:
         findings, _ = redaction.analyze(
@@ -234,7 +258,7 @@ def post_analyze(request: schemas.AnalyzeRequest) -> Dict[str, Any]:
     return {"findings": findings, "count": len(findings), "engine": request.engine}
 
 
-@app.post("/api/redact", response_model=schemas.RedactResponse)
+@app.post("/api/redact", response_model=schemas.RedactResponse, dependencies=[Depends(require_api_key)])
 def post_redact(request: schemas.RedactRequest) -> Dict[str, Any]:
     try:
         result = redaction.redact(
@@ -252,6 +276,7 @@ def post_redact(request: schemas.RedactRequest) -> Dict[str, Any]:
             custom_recognizers=[r.model_dump() for r in request.custom_recognizers],
             detect_organization=request.detect_organization,
             return_explanations=request.return_explanations,
+            store_session=request.store_session,
         )
     except engines.EngineUnavailable as exc:
         raise _http_error(exc, 503)
@@ -267,7 +292,7 @@ def post_redact(request: schemas.RedactRequest) -> Dict[str, Any]:
     return result
 
 
-@app.post("/api/restore", response_model=schemas.RestoreResponse)
+@app.post("/api/restore", response_model=schemas.RestoreResponse, dependencies=[Depends(require_api_key)])
 def post_restore(request: schemas.RestoreRequest) -> Dict[str, Any]:
     try:
         return redaction.restore(text=request.text, session_id=request.session_id)
@@ -279,6 +304,25 @@ def post_restore(request: schemas.RestoreRequest) -> Dict[str, Any]:
 def clear_sessions() -> Dict[str, int]:
     """Drop every stored token mapping. The mappings are the keys to the redaction."""
     return {"cleared": redaction.store.clear()}
+
+
+@app.get("/api/policy")
+def get_policy() -> Dict[str, Any]:
+    """The redaction settings this instance wants clients to use.
+
+    Desktop and extension clients call this at startup instead of shipping their own
+    defaults, so a company can set redaction behaviour centrally by pointing
+    REDACTION_POLICY_FILE at a YAML file.
+    """
+    try:
+        return policy.load_policy(
+            default_entities=DEFAULT_ENTITIES,
+            default_engine=engines.DEFAULT_ENGINE,
+            default_operator=operators.PLACEHOLDER,
+        )
+    except policy.PolicyError as exc:
+        # A misconfigured policy file is an operator error, not a client error.
+        raise _http_error(exc, 500)
 
 
 @app.get("/")

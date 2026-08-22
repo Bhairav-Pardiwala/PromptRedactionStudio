@@ -42,6 +42,11 @@ class AnalyzeRequest(BaseModel):
 class RedactRequest(AnalyzeRequest):
     default_operator: OperatorSpec = Field(default_factory=OperatorSpec)
     per_entity_operators: Dict[str, OperatorSpec] = Field(default_factory=dict)
+    # Desktop and extension clients keep the token mapping themselves and restore
+    # locally, so they pass false: no mapping is retained server-side and there is
+    # nothing for /api/restore to hand back. The web UI leaves this true because its
+    # restore box needs the server to remember.
+    store_session: bool = True
 
 
 class RestoreRequest(BaseModel):
@@ -66,7 +71,7 @@ class AnalyzeResponse(BaseModel):
 
 
 class RedactResponse(BaseModel):
-    session_id: str
+    session_id: Optional[str] = None  # null when store_session was false
     original_text: str
     redacted_text: str
     findings: List[Finding]

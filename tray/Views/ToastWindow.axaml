@@ -1,0 +1,30 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="PromptRedactionTray.Views.ToastWindow"
+        Width="330" SizeToContent="Height"
+        WindowDecorations="None"
+        ShowInTaskbar="False"
+        Topmost="True"
+        ShowActivated="False"
+        CanResize="False"
+        Background="Transparent"
+        TransparencyLevelHint="Transparent">
+
+  <Border x:Name="Root"
+          CornerRadius="10"
+          Padding="14,12"
+          BorderThickness="1"
+          Background="#171B21"
+          BorderBrush="#272D36">
+    <StackPanel Spacing="4">
+      <TextBlock x:Name="TitleText"
+                 FontWeight="SemiBold"
+                 FontSize="13.5"
+                 Foreground="#E8EBF0" />
+      <TextBlock x:Name="BodyText"
+                 FontSize="12"
+                 TextWrapping="Wrap"
+                 Foreground="#A3ADBB" />
+    </StackPanel>
+  </Border>
+</Window>

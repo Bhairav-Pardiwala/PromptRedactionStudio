@@ -381,3 +381,107 @@ def test_unsupported_hash_type_is_a_clean_400(client):
     )
     assert response.status_code == 400
     assert "sha256" in response.json()["detail"]
+
+
+# --- stateless mode, policy and the optional API key -----------------------------
+
+
+def test_store_session_false_retains_nothing_but_still_returns_the_mapping(client):
+    """What the tray app and extension use: the client keeps the key, not the server."""
+    from app import redaction as redaction_module
+
+    before = len(redaction_module.store)
+    result = redact(client, entities=["EMAIL_ADDRESS"], store_session=False)
+
+    assert result["session_id"] is None
+    assert len(redaction_module.store) == before, "no session should have been created"
+    assert result["mapping"], "the caller still needs the mapping to restore locally"
+    assert "jane.doe@example.com" not in result["redacted_text"]
+    assert "jane.doe@example.com" in result["mapping"].values()
+
+
+def test_store_session_false_with_no_findings_still_returns_null_session(client):
+    result = redact(client, text="Nothing sensitive here.", store_session=False)
+    assert result["session_id"] is None
+
+
+def test_store_session_true_still_works_for_the_web_ui(client):
+    """The stateless path must not regress the browser flow."""
+    result = redact(client, entities=["EMAIL_ADDRESS"])
+    assert result["session_id"]
+
+    response = client.post(
+        "/api/restore",
+        json={"text": result["redacted_text"], "session_id": result["session_id"]},
+    )
+    assert response.status_code == 200
+    assert response.json()["restored_text"] == PROMPT
+
+
+def test_policy_returns_defaults_without_a_policy_file(client, monkeypatch):
+    monkeypatch.delenv("REDACTION_POLICY_FILE", raising=False)
+    body = client.get("/api/policy").json()
+
+    assert body["source"] == "defaults"
+    assert body["locked"] is False
+    assert body["default_operator"]["type"] == "placeholder"
+    assert "EMAIL_ADDRESS" in body["entities"]
+
+
+def test_policy_file_overrides_defaults(client, monkeypatch, tmp_path):
+    policy_file = tmp_path / "policy.yaml"
+    policy_file.write_text(
+        "locked: true\n"
+        "score_threshold: 0.8\n"
+        "entities:\n"
+        "  - EMAIL_ADDRESS\n"
+        "  - CREDIT_CARD\n"
+        "default_operator:\n"
+        "  type: hash\n"
+        "  params:\n"
+        "    hash_type: sha512\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("REDACTION_POLICY_FILE", str(policy_file))
+
+    body = client.get("/api/policy").json()
+    assert body["locked"] is True
+    assert body["score_threshold"] == 0.8
+    assert body["entities"] == ["EMAIL_ADDRESS", "CREDIT_CARD"]
+    assert body["default_operator"]["type"] == "hash"
+    # Unspecified fields keep their defaults rather than disappearing.
+    assert body["allow_list"] == []
+
+
+def test_missing_policy_file_is_a_server_error_not_a_crash(client, monkeypatch, tmp_path):
+    monkeypatch.setenv("REDACTION_POLICY_FILE", str(tmp_path / "nope.yaml"))
+    response = client.get("/api/policy")
+    assert response.status_code == 500
+    assert "does not exist" in response.json()["detail"]
+
+
+def test_api_key_is_not_required_when_unset(client, monkeypatch):
+    monkeypatch.delenv("REDACTION_API_KEY", raising=False)
+    response = client.post("/api/analyze", json={"text": PROMPT, "engine": ENGINE})
+    assert response.status_code == 200
+
+
+def test_api_key_is_enforced_when_set(client, monkeypatch):
+    monkeypatch.setenv("REDACTION_API_KEY", "s3cret-key")
+
+    missing = client.post("/api/analyze", json={"text": PROMPT, "engine": ENGINE})
+    assert missing.status_code == 401
+
+    wrong = client.post(
+        "/api/analyze",
+        json={"text": PROMPT, "engine": ENGINE},
+        headers={"X-Redaction-Key": "wrong"},
+    )
+    assert wrong.status_code == 401
+
+    correct = client.post(
+        "/api/analyze",
+        json={"text": PROMPT, "engine": ENGINE},
+        headers={"X-Redaction-Key": "s3cret-key"},
+    )
+    assert correct.status_code == 200

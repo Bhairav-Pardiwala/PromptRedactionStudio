@@ -152,6 +152,87 @@ your prompt anywhere — Presidio runs locally, and no LLM is called.
 
 ---
 
+## Desktop app: redact from anywhere
+
+The web UI is fine for exploring options, but copy-pasting into a browser tab before every
+prompt is friction nobody sustains. `tray/` is an Avalonia desktop client that removes it:
+
+**Copy text in any app → press Ctrl+Alt+R → paste redacted.**
+
+Press **Ctrl+Alt+U** on the model's reply to put the real values back. It works in every
+application — ChatGPT, Claude, Slack, Outlook, an internal ticket system — because it
+operates on the clipboard rather than on a specific website's DOM.
+
+### How it is meant to be deployed
+
+Your organisation runs one instance of the server (the Docker image above), and each
+employee points the tray app at it. One client, many backends.
+
+```powershell
+cd tray
+dotnet run          # development
+
+dotnet publish -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -o ../dist
+```
+
+That produces a single ~97 MB executable with no runtime to install. Swap `win-x64` for
+`linux-x64` or `osx-arm64` to build for other platforms. Releases build automatically on
+tag push via `.github/workflows/release.yml`, with SHA-256 checksums and build provenance
+attestations attached.
+
+> **Windows SmartScreen:** the published binaries are not code-signed, so Windows warns on
+> first run and you must choose *More info → Run anyway*. In a managed rollout employees
+> never see this, because IT redistributes the binary through its own deployment tooling.
+
+### The client keeps the key, not the server
+
+Every request the tray app makes passes `store_session: false`. The server analyses the
+text, returns the redacted version **and the token mapping**, and retains nothing. The
+mapping lives in memory in the client, expires after an hour, and is never written to disk.
+
+That matters for a shared instance: no accumulating store of everyone's real values,
+nothing for an unauthenticated `/api/restore` to hand back, and no session state to scale
+across workers. Restoring is instant and needs no network call.
+
+### Central policy
+
+Clients fetch redaction settings from `GET /api/policy` rather than shipping their own
+defaults, so redaction behaviour is an organisational decision rather than a per-employee
+preference. Point `REDACTION_POLICY_FILE` at a YAML file to set it:
+
+```yaml
+locked: true
+score_threshold: 0.4
+entities: [PERSON, EMAIL_ADDRESS, PHONE_NUMBER, CREDIT_CARD, US_SSN]
+default_operator:
+  type: placeholder
+per_entity_operators:
+  CREDIT_CARD:
+    type: hash
+    params: { hash_type: sha256 }
+allow_list: [Acme Corp]
+```
+
+Anything omitted keeps its default, so an instance with no policy file behaves exactly as
+it always did.
+
+### Authentication
+
+By default there is none — the instance is expected to sit on a trusted network. Set
+`REDACTION_API_KEY` on the server to require an `X-Redaction-Key` header, and enter the
+same value in the tray app's Settings. Leaving it unset disables the check entirely.
+
+### Troubleshooting
+
+The app has no console, so it writes to `%APPDATA%\PromptRedactionTray\log.txt`: hotkey
+registration, whether a hotkey matched, and why a redaction failed. It records events only
+— never clipboard contents, never a token mapping.
+
+If a redaction fails the clipboard is deliberately left untouched, rather than cleared or
+half-processed.
+
+---
+
 ## API
 
 The UI is a thin client over a JSON API; every option above is available directly.
@@ -159,11 +240,16 @@ The UI is a thin client over a JSON API; every option above is available directl
 | Route | Purpose |
 |---|---|
 | `GET /api/config` | engines and availability, entity groups, operator specs, sample prompt |
+| `GET /api/policy` | the redaction settings this instance wants clients to use |
 | `POST /api/analyze` | detections only — type, offsets, score, explanation |
 | `POST /api/redact` | analyze + anonymize — redacted text, token map, session id |
 | `POST /api/restore` | put real values back into text containing tokens |
 | `POST /api/sessions/clear` | drop every stored mapping |
 | `GET /api/health` | liveness, which engines are warm |
+
+`POST /api/redact` accepts `store_session` (default `true`). Pass `false` and the server
+keeps nothing: `session_id` comes back `null`, but the full `mapping` is still returned so
+the caller can restore locally. That is what the desktop client uses.
 
 Interactive docs at `http://localhost:8000/docs`.
 
@@ -188,9 +274,15 @@ app/
   operators.py    UI operator specs -> Presidio OperatorConfig; placeholder allocator
   recognizers.py  ad-hoc regex / deny-list recognizers
   redaction.py    analyze -> anonymize -> restore, plus the TTL session store
+  policy.py       central IT-defined redaction policy, from REDACTION_POLICY_FILE
   schemas.py      pydantic request/response models
   static/         index.html, styles.css, app.js  (no build step)
-tests/test_api.py 30 tests over the API
+tray/             Avalonia desktop client
+  App.axaml.cs    tray icon, hotkey wiring, the redact and restore flows
+  Services/       RedactionClient, MappingStore, HotkeyService, ClipboardService
+  Views/          SettingsWindow, ToastWindow
+tests/test_api.py 38 tests over the API
+tray.Tests/       25 tests over the client logic
 ```
 
 `AnalyzerEngine`'s default registry loads only ~17 recognizers (19 entity types).
@@ -201,14 +293,24 @@ entity types.
 ## Tests
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests\ -v
+.\.venv\Scripts\python.exe -m pytest tests\ -v     # 38 backend tests
+dotnet test tray.Tests                             # 25 desktop client tests
 ```
 
 On macOS or Linux, `python -m pytest tests/ -v` inside the activated venv.
 
-Covers every operator, the placeholder round trip (including against a reworded reply that
-reorders the tokens), encrypt/decrypt, custom recognizers, allow-lists, thresholds,
-explanations, and that malformed input returns a clean 4xx rather than a stack trace.
+The backend suite covers every operator, the placeholder round trip (including against a
+reworded reply that reorders the tokens), encrypt/decrypt, custom recognizers, allow-lists,
+thresholds, explanations, the stateless `store_session: false` path, policy loading, the
+optional API key, and that malformed input returns a clean 4xx rather than a stack trace.
+
+The client suite covers token restoration — repeated tokens, reordered replies, the
+`<PERSON_10>` vs `<PERSON_1>` prefix trap, collisions between separate redactions, and TTL
+expiry — plus hotkey parsing and matching.
+
+`tray.Tests` also contains live tests that run against a real instance and skip themselves
+when none is reachable. Set `REDACTION_TEST_REQUIRE=1` to make them fail instead of skip,
+which is what you want in CI or when verifying by hand.
 
 ## How this was built, and why there's no live demo
 

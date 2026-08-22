@@ -34,3 +34,10 @@ en_core_web_*/
 *.swp
 .DS_Store
 Thumbs.db
+
+# .NET build output (tray app)
+bin/
+obj/
+dist/
+*.user
+.vs/

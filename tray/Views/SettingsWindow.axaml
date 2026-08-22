@@ -1,0 +1,60 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="PromptRedactionTray.Views.SettingsWindow"
+        Title="Prompt Redaction — Settings"
+        Width="460" SizeToContent="Height"
+        WindowStartupLocation="CenterScreen"
+        CanResize="False">
+
+  <StackPanel Margin="20" Spacing="14">
+
+    <TextBlock Text="Instance" FontWeight="SemiBold" />
+    <StackPanel Spacing="6">
+      <TextBlock Text="URL of the redaction service your organisation hosts."
+                 FontSize="11.5" Opacity="0.7" TextWrapping="Wrap" />
+      <TextBox x:Name="UrlBox" Watermark="https://redaction.corp.example.com" />
+    </StackPanel>
+
+    <StackPanel Spacing="6">
+      <TextBlock Text="API key (only if your instance requires one)"
+                 FontSize="11.5" Opacity="0.7" />
+      <TextBox x:Name="KeyBox" PasswordChar="•" Watermark="leave blank for none" />
+    </StackPanel>
+
+    <StackPanel Orientation="Horizontal" Spacing="10">
+      <Button x:Name="TestButton" Content="Test connection" />
+      <TextBlock x:Name="TestResult" VerticalAlignment="Center"
+                 FontSize="12" TextWrapping="Wrap" />
+    </StackPanel>
+
+    <Separator />
+
+    <TextBlock Text="Hotkeys" FontWeight="SemiBold" />
+    <Grid ColumnDefinitions="120,*" RowDefinitions="Auto,8,Auto">
+      <TextBlock Grid.Row="0" Grid.Column="0" Text="Redact clipboard"
+                 VerticalAlignment="Center" FontSize="12" />
+      <TextBox Grid.Row="0" Grid.Column="1" x:Name="RedactHotkeyBox" />
+
+      <TextBlock Grid.Row="2" Grid.Column="0" Text="Restore clipboard"
+                 VerticalAlignment="Center" FontSize="12" />
+      <TextBox Grid.Row="2" Grid.Column="1" x:Name="RestoreHotkeyBox" />
+    </Grid>
+    <TextBlock Text="Format: Ctrl+Alt+R. At least one modifier is required."
+               FontSize="11.5" Opacity="0.7" />
+
+    <CheckBox x:Name="StartupBox" Content="Start automatically when I sign in" />
+
+    <Separator />
+
+    <Expander Header="Policy from this instance">
+      <TextBlock x:Name="PolicyText" FontFamily="Consolas,monospace"
+                 FontSize="11.5" TextWrapping="Wrap"
+                 Text="Not loaded yet — use Test connection." />
+    </Expander>
+
+    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+      <Button x:Name="CancelButton" Content="Cancel" />
+      <Button x:Name="SaveButton" Content="Save" IsDefault="True" />
+    </StackPanel>
+  </StackPanel>
+</Window>

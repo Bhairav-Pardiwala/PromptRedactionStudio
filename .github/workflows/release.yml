@@ -1,0 +1,96 @@
+name: Release tray app
+
+# Builds the desktop client on tag push and attaches the binaries to the release.
+# GitHub Releases is the source of truth; IT pulls from here and redeploys internally.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            rid: win-x64
+            asset: PromptRedactionTray-win-x64.exe
+            binary: PromptRedactionTray.exe
+          - os: ubuntu-latest
+            rid: linux-x64
+            asset: PromptRedactionTray-linux-x64
+            binary: PromptRedactionTray
+          - os: macos-latest
+            rid: osx-arm64
+            asset: PromptRedactionTray-osx-arm64
+            binary: PromptRedactionTray
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0.x"
+
+      # Unit tests only: the live-backend tests skip themselves without an instance.
+      - name: Test
+        run: dotnet test tray.Tests --nologo -v q
+
+      - name: Publish
+        run: >
+          dotnet publish tray
+          -c Release
+          -r ${{ matrix.rid }}
+          --self-contained
+          -p:PublishSingleFile=true
+          -o out
+
+      - name: Rename artifact
+        shell: bash
+        run: mv "out/${{ matrix.binary }}" "out/${{ matrix.asset }}"
+
+      # Free, verifiable provenance -- the binary is provably built from this commit.
+      - uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: out/${{ matrix.asset }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: out/${{ matrix.asset }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd artifacts
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          body: |
+            Desktop client for Prompt Redaction Studio.
+
+            Point it at your organisation's instance in Settings, then use the hotkeys
+            (default Ctrl+Alt+R to redact the clipboard, Ctrl+Alt+U to restore).
+
+            **Windows SmartScreen:** these binaries are not code-signed, so Windows will
+            warn on first run. Choose *More info -> Run anyway*, or verify the download
+            against `SHA256SUMS` and the build attestation first.
