@@ -1,0 +1,286 @@
+"""Prompt Redaction Studio -- a FastAPI app exposing Microsoft Presidio's options.
+
+Serves both the JSON API and the static single-page frontend from one process.
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Any, Dict, List
+
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from presidio_anonymizer.entities import InvalidParamError
+
+from . import engines, operators, recognizers, redaction, schemas
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger("prompt_redaction")
+
+STATIC_DIR = Path(__file__).parent / "static"
+
+app = FastAPI(
+    title="Prompt Redaction Studio",
+    description="Redact PII from LLM prompts with Microsoft Presidio, then restore it.",
+    version="1.0.0",
+)
+
+# Entity groupings, so the options panel can present ~100 entity types usefully rather
+# than as one flat wall of checkboxes.
+ENTITY_GROUPS: List[Dict[str, Any]] = [
+    {
+        "name": "Common",
+        "description": "The everyday identifiers most prompts leak.",
+        "entities": [
+            "PERSON",
+            "EMAIL_ADDRESS",
+            "PHONE_NUMBER",
+            "LOCATION",
+            "ORGANIZATION",
+            "DATE_TIME",
+            "CREDIT_CARD",
+            "IBAN_CODE",
+            "IP_ADDRESS",
+            "URL",
+            "NRP",
+            "AGE",
+            "ID",
+            "MEDICAL_LICENSE",
+            "CRYPTO",
+            "MAC_ADDRESS",
+        ],
+    },
+    {
+        "name": "United States",
+        "description": "US-specific national and financial identifiers.",
+        "entities": [],
+        "prefixes": ["US_", "ABA_"],
+    },
+    {
+        "name": "United Kingdom",
+        "description": "UK national, driving and postal identifiers.",
+        "entities": [],
+        "prefixes": ["UK_"],
+    },
+    {
+        "name": "India",
+        "description": "Aadhaar, PAN, GSTIN and related identifiers.",
+        "entities": [],
+        "prefixes": ["IN_"],
+    },
+    {
+        "name": "Europe",
+        "description": "Country identifiers across the EU and EEA.",
+        "entities": [],
+        "prefixes": ["DE_", "ES_", "IT_", "PL_", "FI_", "SE_"],
+    },
+    {
+        "name": "Rest of world",
+        "description": "Australia, Canada, Singapore, Korea and more.",
+        "entities": [],
+        "prefixes": ["AU_", "CA_", "SG_", "KR_", "NG_", "PH_", "TH_", "TR_", "ZA_"],
+    },
+]
+
+# Ticked on first load. This is the set Presidio's own default registry loads -- the
+# locale-agnostic recognizers plus US/UK. Everything else (78 types in total, including
+# every country pack) is one click away in the entity panel. Enabling all of them by
+# default would bury real findings under national-ID false positives.
+DEFAULT_ENTITIES = [
+    "CREDIT_CARD",
+    "CRYPTO",
+    "DATE_TIME",
+    "EMAIL_ADDRESS",
+    "IBAN_CODE",
+    "IP_ADDRESS",
+    "LOCATION",
+    "MAC_ADDRESS",
+    "MEDICAL_LICENSE",
+    "NRP",
+    "ORGANIZATION",
+    "PERSON",
+    "PHONE_NUMBER",
+    "UK_NHS",
+    "URL",
+    "US_BANK_NUMBER",
+    "US_DRIVER_LICENSE",
+    "US_ITIN",
+    "US_PASSPORT",
+    "US_SSN",
+]
+
+SAMPLE_PROMPT = (
+    "Hi, I need help drafting a reply to a customer complaint.\n\n"
+    "The customer is Marcus Delgado, reachable at marcus.delgado@northwind-retail.com "
+    "or on +1 (415) 555-0182. He lives in Portland, Oregon and has been a member since "
+    "March 3rd, 2019. His account reference is ACME-99120 and the card he used was "
+    "4111 1111 1111 1111.\n\n"
+    "He says a payment of $340 was taken twice on 12/04/2024. Our support agent Priya "
+    "Raghunathan already looked into it and confirmed the duplicate charge came from our "
+    "billing service at 10.42.18.7. Please draft a polite apology explaining the refund "
+    "will take 5 working days."
+)
+
+
+def _http_error(exc: Exception, status: int = 400) -> HTTPException:
+    return HTTPException(status_code=status, detail=str(exc))
+
+
+@app.get("/api/health")
+def health() -> Dict[str, Any]:
+    return {
+        "status": "ok",
+        "loaded_engines": engines.loaded_engines(),
+        "active_sessions": len(redaction.store),
+    }
+
+
+@app.get("/api/config")
+def get_config() -> Dict[str, Any]:
+    """Everything the frontend needs to render its options panel."""
+    availability = engines.availability()
+
+    supported: List[str] = []
+    error: str | None = None
+    # Entity lists come from a real engine's registry. Prefer an available one so the UI
+    # is populated even when the default engine's model was never downloaded.
+    candidates = [engines.DEFAULT_ENGINE] + [
+        key for key, info in availability.items() if info["available"]
+    ]
+    for key in candidates:
+        if not availability.get(key, {}).get("available"):
+            continue
+        try:
+            supported = sorted(set(engines.get_analyzer(key).get_supported_entities("en")))
+            break
+        except Exception as exc:  # pragma: no cover - defensive
+            error = str(exc)
+            logger.warning("Could not load engine %s for entity list: %s", key, exc)
+
+    grouped: List[Dict[str, Any]] = []
+    claimed = set()
+    for group in ENTITY_GROUPS:
+        members = [entity for entity in group["entities"] if entity in supported]
+        for prefix in group.get("prefixes", []):
+            members.extend(
+                entity
+                for entity in supported
+                if entity.startswith(prefix) and entity not in members
+            )
+        members = [entity for entity in members if entity not in claimed]
+        claimed.update(members)
+        if members:
+            grouped.append(
+                {
+                    "name": group["name"],
+                    "description": group["description"],
+                    "entities": sorted(members),
+                }
+            )
+
+    leftovers = sorted(entity for entity in supported if entity not in claimed)
+    if leftovers:
+        grouped.append(
+            {
+                "name": "Other",
+                "description": "Everything else this engine can recognise.",
+                "entities": leftovers,
+            }
+        )
+
+    return {
+        "engines": availability,
+        "default_engine": engines.DEFAULT_ENGINE,
+        "languages": ["en"],
+        "entity_groups": grouped,
+        "all_entities": supported,
+        "default_entities": [e for e in DEFAULT_ENTITIES if e in supported],
+        "operators": operators.OPERATOR_SPECS,
+        "default_operator": operators.PLACEHOLDER,
+        "sample_prompt": SAMPLE_PROMPT,
+        "error": error,
+    }
+
+
+@app.post("/api/analyze", response_model=schemas.AnalyzeResponse)
+def post_analyze(request: schemas.AnalyzeRequest) -> Dict[str, Any]:
+    try:
+        findings, _ = redaction.analyze(
+            text=request.text,
+            engine=request.engine,
+            language=request.language,
+            entities=request.entities,
+            score_threshold=request.score_threshold,
+            allow_list=request.allow_list,
+            allow_list_match=request.allow_list_match,
+            custom_recognizers=[r.model_dump() for r in request.custom_recognizers],
+            detect_organization=request.detect_organization,
+            return_explanations=request.return_explanations,
+        )
+    except engines.EngineUnavailable as exc:
+        raise _http_error(exc, 503)
+    except (
+        redaction.RedactionError,
+        recognizers.RecognizerConfigError,
+        InvalidParamError,
+    ) as exc:
+        raise _http_error(exc)
+
+    return {"findings": findings, "count": len(findings), "engine": request.engine}
+
+
+@app.post("/api/redact", response_model=schemas.RedactResponse)
+def post_redact(request: schemas.RedactRequest) -> Dict[str, Any]:
+    try:
+        result = redaction.redact(
+            text=request.text,
+            default_operator=request.default_operator.model_dump(),
+            per_entity_operators={
+                entity: spec.model_dump() for entity, spec in request.per_entity_operators.items()
+            },
+            engine=request.engine,
+            language=request.language,
+            entities=request.entities,
+            score_threshold=request.score_threshold,
+            allow_list=request.allow_list,
+            allow_list_match=request.allow_list_match,
+            custom_recognizers=[r.model_dump() for r in request.custom_recognizers],
+            detect_organization=request.detect_organization,
+            return_explanations=request.return_explanations,
+        )
+    except engines.EngineUnavailable as exc:
+        raise _http_error(exc, 503)
+    except (
+        redaction.RedactionError,
+        recognizers.RecognizerConfigError,
+        operators.OperatorConfigError,
+        InvalidParamError,
+    ) as exc:
+        raise _http_error(exc)
+
+    result["engine"] = request.engine
+    return result
+
+
+@app.post("/api/restore", response_model=schemas.RestoreResponse)
+def post_restore(request: schemas.RestoreRequest) -> Dict[str, Any]:
+    try:
+        return redaction.restore(text=request.text, session_id=request.session_id)
+    except redaction.RedactionError as exc:
+        raise _http_error(exc)
+
+
+@app.post("/api/sessions/clear")
+def clear_sessions() -> Dict[str, int]:
+    """Drop every stored token mapping. The mappings are the keys to the redaction."""
+    return {"cleared": redaction.store.clear()}
+
+
+@app.get("/")
+def index() -> FileResponse:
+    return FileResponse(STATIC_DIR / "index.html")
+
+
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

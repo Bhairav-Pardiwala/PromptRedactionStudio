@@ -1,0 +1,11 @@
+services:
+  app:
+    build:
+      context: .
+      args:
+        # Set to "false" for a much smaller image that only ships en_core_web_sm.
+        INCLUDE_LARGE_MODEL: "true"
+    image: prompt-redaction
+    ports:
+      - "8000:8000"
+    restart: unless-stopped

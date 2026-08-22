@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prompt Redaction Studio</title>
+<link rel="stylesheet" href="/static/styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛡️</text></svg>">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true">🛡️</span>
+    <div>
+      <h1>Prompt Redaction Studio</h1>
+      <p>Strip PII out of a prompt with Microsoft Presidio &mdash; then put it back.</p>
+    </div>
+  </div>
+  <div class="topbar-actions">
+    <span id="engine-status" class="pill pill-muted">Loading&hellip;</span>
+    <button type="button" id="btn-sample" class="btn btn-ghost">Load sample prompt</button>
+  </div>
+</header>
+
+<main class="layout">
+
+  <!-- ---------------------------------------------------------------- options -->
+  <aside class="panel options" aria-label="Redaction options">
+    <h2 class="panel-title">Options</h2>
+
+    <section class="field">
+      <label for="engine">NLP engine</label>
+      <select id="engine"></select>
+      <p class="hint" id="engine-hint"></p>
+    </section>
+
+    <section class="field">
+      <label for="threshold">
+        Confidence threshold
+        <output id="threshold-value">0.35</output>
+      </label>
+      <input type="range" id="threshold" min="0" max="1" step="0.05" value="0.35">
+      <p class="hint">Only findings scoring at or above this are redacted.</p>
+    </section>
+
+    <section class="field">
+      <label for="default-operator">Default anonymization</label>
+      <select id="default-operator"></select>
+      <div id="default-operator-params" class="param-grid"></div>
+      <p class="hint" id="default-operator-hint"></p>
+    </section>
+
+    <details class="group" open>
+      <summary>Entities to detect <span class="counter" id="entity-counter"></span></summary>
+      <div class="group-body">
+        <div class="row-actions">
+          <button type="button" class="btn btn-tiny" data-select-all="1">Select all</button>
+          <button type="button" class="btn btn-tiny" data-select-all="0">Select none</button>
+          <button type="button" class="btn btn-tiny" id="btn-defaults">Presidio defaults</button>
+        </div>
+        <p class="hint">Per-entity overrides let one entity use a different operator.</p>
+        <div id="entity-groups"></div>
+      </div>
+    </details>
+
+    <details class="group">
+      <summary>Allow-list</summary>
+      <div class="group-body">
+        <p class="hint">Terms here are never redacted, even when a recognizer matches them.</p>
+        <textarea id="allow-list" rows="3" placeholder="One term per line&#10;Acme Corp&#10;support@ourcompany.com"></textarea>
+        <label class="checkbox">
+          <input type="checkbox" id="allow-list-fuzzy">
+          <span>Fuzzy matching (substring rather than exact)</span>
+        </label>
+      </div>
+    </details>
+
+    <details class="group">
+      <summary>Custom recognizers <span class="counter" id="recognizer-counter"></span></summary>
+      <div class="group-body">
+        <p class="hint">Teach Presidio your own entities &mdash; internal IDs, project codenames, ticket refs.</p>
+        <div id="recognizer-list"></div>
+        <button type="button" class="btn btn-tiny" id="btn-add-recognizer">+ Add recognizer</button>
+      </div>
+    </details>
+
+    <details class="group">
+      <summary>Advanced</summary>
+      <div class="group-body">
+        <label class="checkbox">
+          <input type="checkbox" id="detect-org">
+          <span>Detect ORGANIZATION</span>
+        </label>
+        <p class="hint">Presidio ignores ORG by default &mdash; it produces many false positives.</p>
+        <label class="checkbox">
+          <input type="checkbox" id="explanations" checked>
+          <span>Explain every detection</span>
+        </label>
+        <p class="hint">Uses <code>return_decision_process</code> to show which recognizer fired and why.</p>
+        <button type="button" class="btn btn-tiny btn-danger" id="btn-clear-sessions">Clear stored mappings</button>
+      </div>
+    </details>
+  </aside>
+
+  <!-- ----------------------------------------------------------------- prompt -->
+  <section class="panel prompt" aria-label="Prompt">
+    <div class="panel-head">
+      <h2 class="panel-title">Your prompt</h2>
+      <span id="detect-status" class="pill pill-muted">Ready</span>
+    </div>
+
+    <div class="editor-stack">
+      <div id="highlights" class="highlight-layer" aria-hidden="true"></div>
+      <textarea id="prompt" spellcheck="false"
+        placeholder="Paste the prompt you were about to send to an LLM&hellip;"></textarea>
+    </div>
+
+    <div class="panel-head">
+      <h2 class="panel-title">Redacted prompt</h2>
+      <div class="row-actions">
+        <button type="button" class="btn btn-primary" id="btn-redact">Redact</button>
+        <button type="button" class="btn" id="btn-copy" disabled>Copy</button>
+      </div>
+    </div>
+    <textarea id="redacted" class="output" rows="8" readonly
+      placeholder="The redacted version appears here, safe to paste into any model."></textarea>
+    <p class="hint" id="redact-summary"></p>
+
+    <div class="panel-head">
+      <h2 class="panel-title">Restore the reply</h2>
+      <div class="row-actions">
+        <button type="button" class="btn" id="btn-restore" disabled>Restore</button>
+      </div>
+    </div>
+    <p class="hint">Paste the model's answer here to swap the real values back in.</p>
+    <textarea id="reply" rows="5"
+      placeholder="Paste the LLM's response, which will still contain the tokens&hellip;"></textarea>
+    <textarea id="restored" class="output" rows="5" readonly
+      placeholder="The response with real values reinstated appears here."></textarea>
+    <p class="hint" id="restore-summary"></p>
+  </section>
+
+  <!-- --------------------------------------------------------------- findings -->
+  <aside class="panel findings" aria-label="Findings">
+    <div class="panel-head">
+      <h2 class="panel-title">Findings <span class="counter" id="findings-counter"></span></h2>
+    </div>
+    <div id="findings-empty" class="empty">
+      Nothing detected yet. Start typing, or load the sample prompt.
+    </div>
+    <div class="table-scroll">
+      <table id="findings-table" hidden>
+        <thead>
+          <tr>
+            <th data-sort="entity_type">Entity</th>
+            <th data-sort="text">Text</th>
+            <th data-sort="score">Score</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="panel-head">
+      <h2 class="panel-title">Token map</h2>
+    </div>
+    <div id="mapping-empty" class="empty">
+      Redact the prompt to see how each token maps back to the original value.
+    </div>
+    <div class="table-scroll">
+      <table id="mapping-table" hidden>
+        <thead><tr><th>Token</th><th>Original</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p class="hint warn" id="mapping-warning" hidden>
+      This map is the key that undoes the redaction. It is kept in memory only and expires
+      after an hour.
+    </p>
+  </aside>
+</main>
+
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
