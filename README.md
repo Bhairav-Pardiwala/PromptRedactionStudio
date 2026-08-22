@@ -216,7 +216,7 @@ I vibe coded this — built it quickly with an AI assistant rather than hand-wri
 reviewing every line myself. It works, and the test suite covers the behaviour that matters,
 but I haven't audited it the way I would something I was putting in front of real users.
 
-That's also why I haven't put it online. This is a tool for handling PII: a hosted instance
+That's also why I haven't put it online. This is a tool for handling Personal Information: a hosted instance
 would mean strangers pasting real names, card numbers and medical details into a server I
 haven't hardened or reviewed properly — and I'd rather not be responsible for that.
 
