@@ -26,10 +26,14 @@ jobs:
             rid: linux-x64
             asset: PromptRedactionTray-linux-x64
             binary: PromptRedactionTray
+          # macOS keeps libSkiaSharp/libHarfBuzzSharp/libAvaloniaNative beside the binary
+          # even with PublishSingleFile, so the whole directory has to be archived --
+          # shipping the bare binary would produce something that cannot start.
           - os: macos-latest
             rid: osx-arm64
-            asset: PromptRedactionTray-osx-arm64
+            asset: PromptRedactionTray-osx-arm64.tar.gz
             binary: PromptRedactionTray
+            archive: true
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -52,9 +56,19 @@ jobs:
           -p:PublishSingleFile=true
           -o out
 
-      - name: Rename artifact
+      # Windows and Linux genuinely produce one file; macOS does not (see matrix note).
+      - name: Package artifact
         shell: bash
-        run: mv "out/${{ matrix.binary }}" "out/${{ matrix.asset }}"
+        run: |
+          rm -f out/*.pdb
+          if [ "${{ matrix.archive }}" = "true" ]; then
+            chmod +x "out/${{ matrix.binary }}"
+            tar -czf "${{ matrix.asset }}" -C out .
+            mv "${{ matrix.asset }}" "out/${{ matrix.asset }}"
+          else
+            mv "out/${{ matrix.binary }}" "out/${{ matrix.asset }}"
+          fi
+          ls -la out/
 
       # Free, verifiable provenance -- the binary is provably built from this commit.
       - uses: actions/attest-build-provenance@v1
