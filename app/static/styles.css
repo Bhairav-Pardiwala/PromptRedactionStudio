@@ -76,7 +76,7 @@ body {
   display: grid;
   grid-template-columns: 310px minmax(0, 1fr) 330px;
   gap: 16px;
-  padding: 16px 20px 40px;
+  padding: 16px 20px 86px;
   align-items: start;
 }
 
@@ -97,7 +97,7 @@ body {
   padding: 16px;
 }
 
-.options, .findings { position: sticky; top: 78px; max-height: calc(100vh - 96px); overflow-y: auto; }
+.options, .findings { position: sticky; top: 78px; max-height: calc(100vh - 148px); overflow-y: auto; }
 
 @media (max-width: 1240px) { .findings { position: static; max-height: none; } }
 @media (max-width: 860px)  { .options  { position: static; max-height: none; } }
@@ -334,9 +334,35 @@ tbody tr:hover { background: var(--line-soft); }
 /* --- toast ------------------------------------------------------------------ */
 
 .toast {
-  position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
+  position: fixed; bottom: 66px; left: 50%; transform: translateX(-50%);
   background: var(--ink); color: var(--bg);
   padding: 9px 16px; border-radius: 8px; font-size: 13px; font-weight: 550;
   z-index: 50; box-shadow: 0 6px 24px rgba(0,0,0,0.22);
 }
 .toast.error { background: var(--danger); color: #fff; }
+
+/* --- footer ----------------------------------------------------------------- */
+
+/* Pinned to the viewport so the attribution is always on screen -- including in
+   any screenshot taken partway down the page. .layout carries matching bottom
+   padding so the footer never covers the last panel. */
+.footer {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 20px;
+  flex-wrap: wrap;
+  padding: 10px 20px;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+
+.footer a { color: var(--ink-soft); text-decoration: none; border-bottom: 1px solid var(--line); }
+.footer a:hover { color: var(--accent); border-bottom-color: var(--accent); }
