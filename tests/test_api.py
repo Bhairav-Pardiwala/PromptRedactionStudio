@@ -12,11 +12,12 @@ from app.main import app
 
 ENGINE = "spacy_sm"
 
-# A Luhn-valid test card and a well-known placeholder SSN, so the checksum-validating
-# recognizers actually fire.
+# Unmistakable placeholders throughout: Jane Doe, the IANA-reserved example.com domain,
+# the standard 4111... Visa test card (Luhn-valid, so the checksum recognizer actually
+# fires) and a private-range IP. None of it can be mistaken for real personal data.
 PROMPT = (
-    "Please email Marcus Delgado at marcus.delgado@northwind.com or call "
-    "+1 (415) 555-0182. His card is 4111 1111 1111 1111 and the server is at 10.42.18.7. "
+    "Please email Jane Doe at jane.doe@example.com or call "
+    "+1 (415) 555-0182. Their card is 4111 1111 1111 1111 and the server is at 10.42.18.7. "
     "The reference is ACME-99120."
 )
 
@@ -108,7 +109,7 @@ def test_explanations_are_populated_when_requested(client):
 
 
 def test_allow_list_prevents_redaction(client):
-    email = "marcus.delgado@northwind.com"
+    email = "jane.doe@example.com"
 
     without = redact(client, entities=["EMAIL_ADDRESS"])
     assert email not in without["redacted_text"]
@@ -141,7 +142,7 @@ def test_redact_removes_the_value_entirely(client):
     result = redact(
         client, entities=["EMAIL_ADDRESS"], default_operator={"type": "redact", "params": {}}
     )
-    assert "marcus.delgado@northwind.com" not in result["redacted_text"]
+    assert "jane.doe@example.com" not in result["redacted_text"]
     assert "<" not in result["redacted_text"]
 
 
@@ -156,7 +157,7 @@ def test_mask_applies_the_requested_character_count(client):
     )
     assert "#####" in result["redacted_text"]
     # Only the first five characters are masked, so the domain survives.
-    assert "northwind.com" in result["redacted_text"]
+    assert "example.com" in result["redacted_text"]
 
 
 def test_mask_from_end_masks_the_tail(client):
@@ -168,8 +169,8 @@ def test_mask_from_end_masks_the_tail(client):
             "params": {"masking_char": "#", "chars_to_mask": 5, "from_end": True},
         },
     )
-    assert "marcus" in result["redacted_text"]
-    assert "northwind.com" not in result["redacted_text"]
+    assert "jane.doe" in result["redacted_text"]
+    assert "example.com" not in result["redacted_text"]
 
 
 @pytest.mark.parametrize("hash_type,length", [("sha256", 64), ("sha512", 128)])
@@ -200,7 +201,7 @@ def test_per_entity_operator_overrides_the_default(client):
         per_entity_operators={"CREDIT_CARD": {"type": "replace", "params": {"new_value": "[CARD]"}}},
     )
     assert "[CARD]" in result["redacted_text"]
-    assert "marcus.delgado@northwind.com" not in result["redacted_text"]
+    assert "jane.doe@example.com" not in result["redacted_text"]
 
 
 # --- placeholders and the restore round trip ------------------------------------
@@ -227,7 +228,7 @@ def test_the_same_value_reuses_one_token(client):
 
 def test_placeholder_round_trip_is_exact(client):
     result = redact(client)
-    assert "marcus.delgado@northwind.com" not in result["redacted_text"]
+    assert "jane.doe@example.com" not in result["redacted_text"]
 
     response = client.post(
         "/api/restore",
@@ -285,7 +286,7 @@ def test_encrypt_decrypt_round_trip(client):
         entities=["EMAIL_ADDRESS"],
         default_operator={"type": "encrypt", "params": {"key": key}},
     )
-    assert "marcus.delgado@northwind.com" not in result["redacted_text"]
+    assert "jane.doe@example.com" not in result["redacted_text"]
 
     response = client.post(
         "/api/restore",
