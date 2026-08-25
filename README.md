@@ -18,7 +18,40 @@ how the restore round trip works.
 
 ---
 
-## Install and run
+## Just run it
+
+No Python, no terminal, no Docker knowledge needed.
+
+**Windows** — download or clone this repository, then double-click **`Start.cmd`**.
+
+**macOS and Linux** — download or clone, then in Terminal:
+
+```bash
+./start.sh
+```
+
+That is the whole thing. The launcher finds a supported Python (offering to install one if
+there is none), sets everything up, starts the app, and opens your browser at
+<http://127.0.0.1:8000>. It also offers to install the desktop app with its clipboard
+hotkey. Run it again whenever you like — it remembers, and starts in seconds.
+
+The first run downloads about 1.5 GB and takes 5–15 minutes, most of it the
+`en_core_web_lg` language model. Add `-Small` / `--small` to skip it and use the 12 MB
+model instead, which detects noticeably fewer names and places.
+
+| | Windows | macOS / Linux |
+|---|---|---|
+| Different port | `Start.cmd -Port 9000` | `./start.sh --port 9000` |
+| Small model only | `Start.cmd -Small` | `./start.sh --small` |
+| Leave the browser alone | `Start.cmd -NoBrowser` | `./start.sh --no-browser` |
+| Skip the desktop app | `Start.cmd -NoTray` | `./start.sh --no-tray` |
+
+The first run needs to reach PyPI. On a locked-down machine where that is blocked, use
+Docker instead.
+
+---
+
+## Other ways to run it
 
 Requires **Python 3.10–3.14** (Presidio's supported range), or just Docker.
 

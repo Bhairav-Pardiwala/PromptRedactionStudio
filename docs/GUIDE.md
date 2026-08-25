@@ -124,7 +124,22 @@ prompt is friction nobody sustains. `tray/` is an Avalonia desktop client that r
 **copy text in any app → press Ctrl+Alt+R → paste redacted**, and **Ctrl+Alt+U** on the
 model's reply to put the real values back.
 
-### How it is meant to be deployed
+### One person, one machine
+
+If it is just you, `Start.cmd` (Windows) or `./start.sh` (macOS, Linux) is the whole
+deployment. The launcher creates the virtualenv, installs the dependencies and models,
+starts the server on `127.0.0.1:8000`, opens the browser, and offers to fetch the tray app
+from the latest GitHub release — verifying it against the release's `SHA256SUMS`, since the
+binaries are not code-signed. It remembers what it did in `.venv/.setup-stamp`, so the
+second run skips straight to launching.
+
+The tray app defaults to `http://127.0.0.1:8000`, which is exactly what the launcher
+starts, so on the default port there is nothing to configure.
+
+Its one requirement is network access to PyPI on the first run. Where that is blocked,
+Docker is the way in.
+
+### How it is meant to be deployed across an organisation
 
 Your organisation runs one instance of the server (the Docker image), and each employee
 points the tray app at it. One client, many backends.
@@ -231,7 +246,10 @@ A worked round trip with real request and response bodies is in the
 ```
 Dockerfile        both spaCy models baked in; INCLUDE_LARGE_MODEL=false for a slim build
 docker-compose.yml
-setup.ps1 / run.ps1   Windows convenience scripts
+Start.cmd         double-click entry point on Windows (.ps1 files cannot be)
+start.ps1         one-step launcher: set up if needed, run, open the browser, offer the tray app
+start.sh          the same for macOS and Linux
+setup.ps1 / run.ps1   Windows convenience scripts, called by start.ps1
 app/
   main.py         FastAPI routes, entity grouping, sample prompt
   engines.py      lazy cached engine registry; loads all 78 predefined recognizers
