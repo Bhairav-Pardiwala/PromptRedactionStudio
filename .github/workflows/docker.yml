@@ -1,0 +1,130 @@
+name: Publish Docker image
+
+# Pushes the app image to Docker Hub so first contact is one `docker run` line rather
+# than a 1.6 GB local build. Same trigger shape as release.yml -- tags are the source of
+# truth -- plus a dispatch input, because the v1.0.0 tag predates this workflow and
+# force-moving a published tag is worse than passing a version by hand once.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to tag the image with (alongside latest)"
+        default: "1.0.0"
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+env:
+  IMAGE: bhairavpardiwala/prompt-redaction-studio
+
+jobs:
+  # Native runners, no QEMU: the repo is public, so ubuntu-24.04-arm is free, and
+  # emulating an image that downloads a 590 MB spaCy model is slow and flaky.
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux/amd64
+            slug: amd64
+          - os: ubuntu-24.04-arm
+            platform: linux/arm64
+            slug: arm64
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Pushed by digest only, with no tags: the merge job assembles both digests into
+      # one manifest list so `docker pull` resolves the right architecture by itself.
+      # provenance=false keeps each digest a plain image manifest -- buildkit's own
+      # attestation manifests would confuse imagetools create. Provenance is attested
+      # on the final manifest in the merge job instead.
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          provenance: false
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.slug }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.slug }}
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.slug }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # On a tag push the version comes from the tag; on a dispatch it comes from the
+      # input. latest always moves.
+      - name: Tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=${{ inputs.version }},enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=raw,value=latest
+
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf "$IMAGE@sha256:%s " *)
+
+      # Both platforms must appear here. One means the merge silently did nothing useful.
+      - name: Inspect manifest
+        id: manifest
+        run: |
+          docker buildx imagetools inspect "$IMAGE:${{ steps.meta.outputs.version }}"
+          digest=$(docker buildx imagetools inspect "$IMAGE:${{ steps.meta.outputs.version }}" \
+            --format '{{json .Manifest.Digest}}' | tr -d '"')
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      # Same provenance stance release.yml already takes for the tray binaries.
+      - uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: index.docker.io/${{ env.IMAGE }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
+          push-to-registry: true
