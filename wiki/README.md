@@ -9,6 +9,18 @@ reference — these pages link to it rather than duplicating it.
 
 ## Publishing to the wiki
 
+A folder named `wiki/` in this repository is **not** the Wiki tab. GitHub keeps the wiki in
+a separate repository, `PromptRedactionStudio.wiki.git`, and pushing here does nothing to
+it.
+
+**The first time**, that separate repository does not exist yet and cannot be cloned — the
+clone fails with *Repository not found* even when the wiki is enabled in Settings →
+Features. GitHub creates it when the first page is saved, and there is no API for that, so
+it has to be done once by hand: open the repository's **Wiki** tab, choose *Create the first
+page*, and save anything at all. The `Home.md` below replaces it.
+
+**After that**, publishing is a copy:
+
 ```bash
 git clone https://github.com/Bhairav-Pardiwala/PromptRedactionStudio.wiki.git
 cp wiki/*.md PromptRedactionStudio.wiki/       # everything except this README
@@ -17,8 +29,9 @@ rm -f README.md
 git add -A && git commit -m "Update wiki" && git push
 ```
 
-The wiki has to be enabled once in the repository's Settings → Features before that clone
-URL exists.
+Nothing keeps the two in step automatically. Edit the pages here, review them in a pull
+request, and re-run the copy — an edit made in GitHub's wiki editor will be overwritten by
+the next publish.
 
 ## Two conventions to keep
 
