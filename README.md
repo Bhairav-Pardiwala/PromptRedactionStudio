@@ -4,6 +4,10 @@ Strip PII out of LLM prompts with [Microsoft Presidio](https://github.com/micros
 then put it back afterwards. Runs entirely on your machine — no LLM is called and nothing
 you paste leaves the box.
 
+[![CI](https://github.com/Bhairav-Pardiwala/PromptRedactionStudio/actions/workflows/ci.yml/badge.svg)](https://github.com/Bhairav-Pardiwala/PromptRedactionStudio/actions/workflows/ci.yml)
+[![Docker image](https://img.shields.io/docker/image-size/bhairavpardiwala/prompt-redaction-studio/latest?logo=docker&label=docker%20image)](https://hub.docker.com/r/bhairavpardiwala/prompt-redaction-studio)
+[![Docker pulls](https://img.shields.io/docker/pulls/bhairavpardiwala/prompt-redaction-studio?label=pulls)](https://hub.docker.com/r/bhairavpardiwala/prompt-redaction-studio)
+
 ![The web UI detecting personal data in a prompt, with the options panel on the left and scored findings on the right](docs/web-ui-detection.png)
 
 Paste a prompt, get a redacted version to copy, send it to any model, then paste the reply
@@ -58,14 +62,23 @@ Requires **Python 3.10–3.14** (Presidio's supported range), or just Docker.
 ### Docker
 
 ```bash
+docker run --rm -p 8000:8000 bhairavpardiwala/prompt-redaction-studio
+```
+
+Then open <http://localhost:8000>. That pulls about 550 MB and runs natively on both Intel
+and Apple Silicon. Both spaCy models are already baked in, so no model is downloaded at
+startup.
+
+Or build it yourself:
+
+```bash
 docker build -t prompt-redaction .
 docker run --rm -p 8000:8000 prompt-redaction
 ```
 
-Or `docker compose up --build`. Then open <http://localhost:8000>.
-
-The image is ~1.6 GB because it bakes in both spaCy models. Add
-`--build-arg INCLUDE_LARGE_MODEL=false` for a slim image with only `en_core_web_sm`.
+Or `docker compose up --build`. A local build unpacks to ~1.6 GB on disk because it bakes in
+both spaCy models. Add `--build-arg INCLUDE_LARGE_MODEL=false` for a slim image with only
+`en_core_web_sm`.
 
 ### Windows (PowerShell)
 
@@ -176,12 +189,35 @@ Org deployment, central policy and the API key are covered in the
 
 ---
 
+## Verifying what you downloaded
+
+Both the Docker image and the tray binaries are built in GitHub Actions and carry a
+[build attestation](https://docs.github.com/actions/security-guides/using-artifact-attestations)
+— cryptographic proof of which repository, workflow and commit produced them. Check it with
+the [GitHub CLI](https://cli.github.com) before trusting either one:
+
+```bash
+gh attestation verify --owner Bhairav-Pardiwala oci://bhairavpardiwala/prompt-redaction-studio:1.0.0
+
+gh attestation verify --owner Bhairav-Pardiwala PromptRedactionTray-win-x64.exe
+```
+
+A pass means the artifact came from this repository's CI and has not been altered since.
+It is not a statement that the code is free of bugs — see the note at the bottom.
+
+---
+
 ## Tests
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests\ -v     # 38 backend tests
+.\.venv\Scripts\python.exe -m pytest tests\ -v     # 40 backend tests
 dotnet test tray.Tests                             # 25 desktop client tests
 ```
+
+Among them, `tests/test_no_egress.py` intercepts every socket and DNS lookup, runs a full
+detect → redact → restore round trip, and fails if anything reaches past loopback. That is
+the claim in the first paragraph of this README written down as something which breaks the
+build, rather than something you have to take on faith.
 
 On macOS or Linux, `python -m pytest tests/ -v` inside the activated venv.
 
