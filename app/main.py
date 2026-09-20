@@ -183,7 +183,9 @@ def get_config() -> Dict[str, Any]:
             supported = sorted(set(engines.get_analyzer(key).get_supported_entities("en")))
             break
         except Exception as exc:  # pragma: no cover - defensive
-            error = str(exc)
+            # This field goes to the browser, and the exception text carries model paths
+            # and internals. The detail belongs in the log, not the response body.
+            error = "Could not load engine " + key + " for the entity list. See server logs."
             logger.warning("Could not load engine %s for entity list: %s", key, exc)
 
     grouped: List[Dict[str, Any]] = []
