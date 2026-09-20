@@ -9,3 +9,12 @@ services:
     ports:
       - "8000:8000"
     restart: unless-stopped
+    # environment:
+    #   # Require an X-Redaction-Key header on /api/analyze|redact|restore. Unset means
+    #   # no authentication, which is the default and assumes a trusted network. Note
+    #   # that setting it also 401s the bundled web UI, which sends no such header.
+    #   REDACTION_API_KEY: ${REDACTION_API_KEY:?set REDACTION_API_KEY before composing up}
+    #   # Org-wide redaction defaults served by /api/policy. Mount the file too.
+    #   REDACTION_POLICY_FILE: /policy.yaml
+    # volumes:
+    #   - ./policy.yaml:/policy.yaml:ro

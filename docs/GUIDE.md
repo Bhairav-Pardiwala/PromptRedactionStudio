@@ -195,6 +195,44 @@ By default there is none — the instance is expected to sit on a trusted networ
 `REDACTION_API_KEY` on the server to require an `X-Redaction-Key` header, and enter the
 same value in the tray app's Settings. Leaving it unset disables the check entirely.
 
+It is an environment variable on the **server** process, wherever that runs:
+
+```bash
+docker run --rm -p 8000:8000 -e REDACTION_API_KEY="$REDACTION_API_KEY" \
+  bhairavpardiwala/prompt-redaction-studio
+```
+
+```yaml
+# docker-compose.yml — the value comes from the environment or a .env file,
+# so the key itself is never committed.
+services:
+  app:
+    environment:
+      REDACTION_API_KEY: ${REDACTION_API_KEY:?set REDACTION_API_KEY before composing up}
+```
+
+```powershell
+$env:REDACTION_API_KEY = "..."    # then .\run.ps1, which inherits it
+```
+
+```bash
+REDACTION_API_KEY=... uvicorn app.main:app --port 8000
+```
+
+`require_api_key` (`app/main.py:136`) reads the variable on every request rather than at
+import, but a process cannot have its environment changed from the outside — so in practice
+rotating the key means restarting the server. Clients pick up a new key as soon as it is
+entered in Settings; no redaction already performed is affected either way.
+
+Three routes enforce it — `/api/analyze`, `/api/redact` and `/api/restore`. `/api/health`,
+`/api/config`, `/api/policy` and `/api/sessions/clear` stay open: the first three expose no
+prompt content, and clearing sessions only ever discards data.
+
+> **Setting a key disables the bundled web UI.** The page at `/` still loads, but its
+> requests carry no `X-Redaction-Key` header, so every detection returns 401. That is the
+> intended trade for a shared instance — the desktop client is the way in, and it has a
+> field for the key. Leave the variable unset on an instance whose browser UI people use.
+
 ### Troubleshooting
 
 The app has no console, so it writes to `%APPDATA%\PromptRedactionTray\log.txt`: hotkey
