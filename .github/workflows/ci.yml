@@ -1,0 +1,62 @@
+name: CI
+
+# Runs the whole test suite on every push and pull request. release.yml and docker.yml
+# only fire on tags, so before this there was nothing saying the 40 backend tests and 25
+# tray tests the README advertises are green right now.
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push makes an in-flight run irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    # Both ends of the range the README claims (Python 3.10-3.14). The Docker image
+    # runs 3.13; 3.10 is there so the lower bound is a tested claim, not a guess.
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.13"]
+
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # The suite pins itself to spacy_sm so it stays fast; en_core_web_lg is 590 MB
+      # and would tell us nothing extra about the plumbing being tested.
+      - name: spaCy model
+        run: python -m spacy download en_core_web_sm
+
+      - name: Test
+        run: python -m pytest tests/ -v
+
+  tray:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0.x"
+
+      # Unit tests only: the live-backend tests skip themselves without an instance.
+      - name: Test
+        run: dotnet test tray.Tests --nologo -v q
