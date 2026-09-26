@@ -41,3 +41,9 @@ obj/
 dist/
 *.user
 .vs/
+
+# Claude Code local context -- not shared with the repo.
+# .claude/ holds a full worktree with its own .venv (~340 MB); without this
+# line a `git add -A` would sweep the lot into a commit.
+CLAUDE.md
+.claude/
