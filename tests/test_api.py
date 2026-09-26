@@ -343,6 +343,66 @@ def test_custom_deny_list_recognizer(client):
     assert "Kestrel" not in result["redacted_text"]
 
 
+# The web UI's right-click "mark this selection" sends exactly this shape: a deny-list
+# recognizer whose `entity` pins a real Presidio type, so the marked term shares the
+# built-in type's colour and token series instead of inventing one.
+MARKED_TEXT = "Ask Project Halcyon to confirm with jane.doe@example.com."
+MARKED_RECOGNIZER = {
+    "name": "PERSON",
+    "entity": "PERSON",
+    "kind": "deny_list",
+    "deny_list": ["Project Halcyon"],
+    "score": 1.0,
+}
+
+
+def test_marked_term_reuses_a_builtin_entity_type(client):
+    # PERSON is deliberately absent from `entities`: analyze() adds custom entity types back
+    # into the requested list, which is what lets a user mark a term as PERSON while PERSON
+    # itself is unchecked in the options panel. The same fold-in re-enables the built-in
+    # PERSON recognizer, so an unchecked PERSON stops filtering names once a PERSON mark
+    # exists -- surprising, but it is the filter being shared, not this request.
+    result = redact(
+        client,
+        text=MARKED_TEXT,
+        entities=["EMAIL_ADDRESS"],
+        custom_recognizers=[MARKED_RECOGNIZER],
+    )
+    assert "Project Halcyon" not in result["redacted_text"]
+    assert "PERSON" in entity_types(result["findings"])
+    assert any(token.startswith("<PERSON_") for token in result["mapping"])
+
+
+def test_marked_term_restores(client):
+    result = redact(
+        client,
+        text=MARKED_TEXT,
+        entities=["EMAIL_ADDRESS"],
+        custom_recognizers=[MARKED_RECOGNIZER],
+    )
+    response = client.post(
+        "/api/restore",
+        json={"text": result["redacted_text"], "session_id": result["session_id"]},
+    )
+    assert response.status_code == 200, response.text
+    restored = response.json()
+    assert "Project Halcyon" in restored["restored_text"]
+    assert restored["restored_counts"]["<PERSON_1>"] == 1
+    assert restored["not_found"] == []
+
+
+def test_deny_list_matching_is_case_insensitive(client):
+    # Presidio's deny-list regex carries re.IGNORECASE, so marking one casing covers them
+    # all. The UI promises that, so a Presidio bump that drops the flag should fail here.
+    result = redact(
+        client,
+        text=MARKED_TEXT,
+        entities=["EMAIL_ADDRESS"],
+        custom_recognizers=[dict(MARKED_RECOGNIZER, deny_list=["project halcyon"])],
+    )
+    assert "Project Halcyon" not in result["redacted_text"]
+
+
 def test_invalid_custom_regex_is_a_clean_400(client):
     response = client.post(
         "/api/analyze",

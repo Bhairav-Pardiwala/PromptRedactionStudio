@@ -1,8 +1,8 @@
 name: CI
 
 # Runs the whole test suite on every push and pull request. release.yml and docker.yml
-# only fire on tags, so before this there was nothing saying the 40 backend tests and 25
-# tray tests the README advertises are green right now.
+# only fire on tags, so before this there was nothing saying the backend and tray tests the
+# README advertises are green right now.
 on:
   push:
     branches: ["main"]

@@ -81,6 +81,23 @@ to come back mangled — placeholders survive the round trip far more reliably.
 - **Allow-list** — terms never redacted, with exact or fuzzy matching.
 - **Custom recognizers** — your own entity types from a regex or a deny-list, passed as
   `ad_hoc_recognizers` so the shared engine is never mutated.
+- **Mark a selection** — select a word or phrase in the prompt, right-click, and pick a
+  label. The term joins a deny-list recognizer for that label, so a name the models missed,
+  marked as `PERSON`, gets a `<PERSON_1>` token alongside the ones Presidio found itself.
+  Because the deny-list is a regex, marking is whole-word and hides *every* occurrence,
+  case-insensitively; the menu refuses a mid-word selection rather than accept a mark that
+  would match nothing. The same menu offers **Never redact**, which appends the term to the
+  allow-list. Marked terms land in an ordinary custom-recognizer card, so that is where you
+  edit or remove them.
+
+  Right-clicking a value that is already highlighted acts on the whole value — no need to
+  select it first, and a partial selection inside one widens to cover it. So allow-listing a
+  detected address adds the address, never the fragment under the pointer.
+
+  A mark works whatever the entity checkboxes say — custom entity types are added back into
+  the requested set. That cuts both ways: while a `PERSON` mark exists, unchecking PERSON
+  no longer stops Presidio finding other names, because the same list drives the built-in
+  recognizers.
 - **Detect ORGANIZATION** — Presidio suppresses `ORG` by default because it produces many
   false positives. This toggle makes that visible rather than mysterious.
 - **Explanations** — `return_decision_process`, surfacing which recognizer fired, the
@@ -355,7 +372,7 @@ entity types.
 ## Tests
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests\ -v     # 38 backend tests
+.\.venv\Scripts\python.exe -m pytest tests\ -v     # 68 backend tests
 dotnet test tray.Tests                             # 25 desktop client tests
 ```
 
