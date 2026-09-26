@@ -1133,14 +1133,158 @@
     toast("“" + term + "” will never be redacted");
   }
 
+  /* --- dictation (on-device speech) ----------------------------------------- */
+  /* Speech is only ever recognised on-device. The ordinary Web Speech API in Chrome and
+     Edge streams audio to Google or Microsoft, which would ship spoken PII off the machine
+     before it is redacted -- so a browser that cannot recognise locally gets a disabled
+     button, never a cloud fallback.
+
+     Chrome has renamed the on-device API once already, so both generations are detected:
+     available()/install() with processLocally, and availableOnDevice()/installOnDevice()
+     with mode = "ondevice-only". Only final results are written into the prompt; interim
+     text is shown beside it, so the debounced analyze() never chases words that are still
+     changing. Transcripts are prompt content and are never logged. */
+
+  var dictation = { recognition: null, listening: false, lang: navigator.language || "en-US" };
+
+  function onDeviceApi(SR) {
+    if (typeof SR.available === "function") {
+      return {
+        check: function (lang) { return SR.available({ langs: [lang], processLocally: true }); },
+        install: function (lang) { return SR.install({ langs: [lang], processLocally: true }); },
+        configure: function (rec) { rec.processLocally = true; }
+      };
+    }
+    if (typeof SR.availableOnDevice === "function") {
+      return {
+        check: function (lang) { return SR.availableOnDevice(lang); },
+        install: function (lang) { return SR.installOnDevice(lang); },
+        configure: function (rec) { rec.mode = "ondevice-only"; }
+      };
+    }
+    return null;
+  }
+
+  function setDictateButton(listening, busyText) {
+    var btn = $("btn-dictate");
+    dictation.listening = listening;
+    btn.classList.toggle("is-listening", listening);
+    btn.setAttribute("aria-pressed", listening ? "true" : "false");
+    btn.textContent = busyText || (listening ? "Stop" : "Dictate");
+    if (!listening) { $("dictate-interim").hidden = true; }
+  }
+
+  function disableDictation(reason) {
+    var btn = $("btn-dictate");
+    btn.disabled = true;
+    btn.title = reason;
+  }
+
+  function insertDictated(text) {
+    var prompt = $("prompt");
+    var start = prompt.selectionStart;
+    var end = prompt.selectionEnd;
+    text = text.trim();
+    if (!text) { return; }
+    var before = prompt.value.charAt(start - 1);
+    if (start > 0 && before && !/\s/.test(before)) { text = " " + text; }
+    prompt.setRangeText(text, start, end, "end");
+    onPromptChanged();
+  }
+
+  function startDictation(SR, device) {
+    var rec = new SR();
+    device.configure(rec);
+    rec.lang = dictation.lang;
+    rec.continuous = true;
+    rec.interimResults = true;
+
+    rec.onresult = function (event) {
+      var interim = "";
+      for (var i = event.resultIndex; i < event.results.length; i++) {
+        var result = event.results[i];
+        if (result.isFinal) { insertDictated(result[0].transcript); }
+        else { interim += result[0].transcript; }
+      }
+      var box = $("dictate-interim");
+      box.textContent = interim ? "Hearing: " + interim : "";
+      box.hidden = !interim;
+    };
+    rec.onerror = function (event) {
+      if (event.error === "not-allowed") {
+        toast("Microphone permission denied", true);
+      } else if (event.error === "language-not-supported" || event.error === "service-not-allowed") {
+        toast("On-device speech recognition is unavailable for " + dictation.lang, true);
+      } else if (event.error !== "no-speech" && event.error !== "aborted") {
+        toast("Dictation stopped: " + event.error, true);
+      }
+    };
+    rec.onend = function () {
+      dictation.recognition = null;
+      setDictateButton(false);
+    };
+
+    dictation.recognition = rec;
+    $("prompt").focus();
+    rec.start();
+    setDictateButton(true);
+  }
+
+  function toggleDictation(SR, device) {
+    if (dictation.recognition) { dictation.recognition.stop(); return; }
+    var btn = $("btn-dictate");
+    btn.disabled = true;
+    Promise.resolve(device.check(dictation.lang)).then(function (availability) {
+      // The earliest builds answered with a plain boolean rather than a status string.
+      if (availability === "available" || availability === true) { return true; }
+      if (availability === "downloadable" || availability === "downloading") {
+        setDictateButton(false, "Downloading model…");
+        return device.install(dictation.lang);
+      }
+      return false;
+    }).then(function (ready) {
+      btn.disabled = false;
+      setDictateButton(false);
+      if (!ready) {
+        toast("On-device speech recognition is unavailable for " + dictation.lang, true);
+        return;
+      }
+      startDictation(SR, device);
+    }).catch(function () {
+      btn.disabled = false;
+      setDictateButton(false);
+      toast("Could not start on-device speech recognition", true);
+    });
+  }
+
+  function initDictation() {
+    var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { return; }   // no speech API at all: keep the button hidden
+    var btn = $("btn-dictate");
+    btn.hidden = false;
+    var device = onDeviceApi(SR);
+    if (!device) {
+      disableDictation("On-device speech recognition isn't available in this browser; " +
+        "dictation is off so audio never leaves your machine.");
+      return;
+    }
+    btn.title = "Dictate into the prompt, recognised on this device";
+    btn.addEventListener("click", function () { toggleDictation(SR, device); });
+    document.addEventListener("visibilitychange", function () {
+      if (document.hidden && dictation.recognition) { dictation.recognition.stop(); }
+    });
+  }
+
   /* --- wiring --------------------------------------------------------------- */
+
+  function onPromptChanged() {
+    renderHighlights(state.findings);   // repaint immediately so text stays legible
+    scheduleAnalyze();
+  }
 
   function bindEvents() {
     var prompt = $("prompt");
-    prompt.addEventListener("input", function () {
-      renderHighlights(state.findings);   // repaint immediately so text stays legible
-      scheduleAnalyze();
-    });
+    prompt.addEventListener("input", onPromptChanged);
     prompt.addEventListener("contextmenu", openMarkMenu);
     prompt.addEventListener("scroll", function () {
       $("highlights").scrollTop = prompt.scrollTop;
@@ -1260,6 +1404,7 @@
     renderEntityGroups(config);
     renderRecognizers();
     bindEvents();
+    initDictation();
     $("threshold-value").value = state.threshold.toFixed(2);
   }).catch(function (err) {
     status($("engine-status"), "Failed to load", "err");
