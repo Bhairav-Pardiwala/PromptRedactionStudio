@@ -115,7 +115,10 @@
   <section class="panel prompt" aria-label="Prompt">
     <div class="panel-head">
       <h2 class="panel-title">Your prompt</h2>
-      <span id="detect-status" class="pill pill-muted">Ready</span>
+      <div class="row-actions">
+        <button type="button" class="btn btn-tiny btn-mic" id="btn-dictate" aria-pressed="false" hidden>Dictate</button>
+        <span id="detect-status" class="pill pill-muted">Ready</span>
+      </div>
     </div>
 
     <div class="editor-stack">
@@ -123,6 +126,7 @@
       <textarea id="prompt" spellcheck="false"
         placeholder="Paste the prompt you were about to send to an LLM&hellip;"></textarea>
     </div>
+    <p class="hint dictate-interim" id="dictate-interim" aria-live="polite" hidden></p>
 
     <div class="panel-head">
       <h2 class="panel-title">Redacted prompt</h2>
