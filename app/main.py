@@ -55,29 +55,40 @@ def _docs_enabled() -> bool:
 
 
 def _log_auth_status() -> None:
-    """Say once, at startup, whether authentication is on. Never log a key."""
-    api_key = os.environ.get(API_KEY_ENV)
-    admin_key = os.environ.get(ADMIN_KEY_ENV)
+    """Say once, at startup, whether authentication is on.
 
-    if not api_key and not admin_key:
+    Every key is reduced to a bool or a name before anything is logged, so no code path
+    here can reach a logger while still holding a key. Not even its length: that is a
+    small thing to hand an attacker, and it is of no use to the operator either.
+    """
+    configured = {
+        name: bool(os.environ.get(name)) for name in (API_KEY_ENV, ADMIN_KEY_ENV)
+    }
+    too_short = [
+        name
+        for name in (API_KEY_ENV, ADMIN_KEY_ENV)
+        if 0 < len(os.environ.get(name) or "") < MIN_KEY_CHARS
+    ]
+
+    if not any(configured.values()):
         logger.info("Authentication is off (%s unset): every route is open.", API_KEY_ENV)
         return
 
     logger.info(
         "Authentication is on. %s: %s. %s: %s.",
         API_KEY_HEADER,
-        "required" if api_key else "not set",
+        "required" if configured[API_KEY_ENV] else "not set",
         ADMIN_KEY_HEADER,
-        "required for /api/sessions/clear" if admin_key else "not set, falling back to " + API_KEY_HEADER,
+        "required for /api/sessions/clear"
+        if configured[ADMIN_KEY_ENV]
+        else "not set, falling back to " + API_KEY_HEADER,
     )
-    for name, value in ((API_KEY_ENV, api_key), (ADMIN_KEY_ENV, admin_key)):
-        if value and len(value) < MIN_KEY_CHARS:
-            logger.warning(
-                "%s is only %d characters long; %d or more is recommended.",
-                name,
-                len(value),
-                MIN_KEY_CHARS,
-            )
+    for name in too_short:
+        logger.warning(
+            "%s is shorter than %d characters; a longer key is recommended.",
+            name,
+            MIN_KEY_CHARS,
+        )
 
 
 @asynccontextmanager
