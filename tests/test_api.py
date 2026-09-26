@@ -5,6 +5,8 @@ plumbing around Presidio (operators, custom recognizers, allow-lists, the restor
 round trip), not the NER model's accuracy.
 """
 
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -485,3 +487,150 @@ def test_api_key_is_enforced_when_set(client, monkeypatch):
         headers={"X-Redaction-Key": "s3cret-key"},
     )
     assert correct.status_code == 200
+
+
+# --- route-level auth coverage ---------------------------------------------------
+#
+# The point of these is not that the key works -- the two tests above cover that -- but
+# that it covers the right routes. A destructive route left open is the failure mode
+# worth a regression test, so each row below is pinned rather than assumed.
+
+KEY = "an-instance-key-long-enough-to-pass-32"
+ADMIN = "a-separate-admin-key-also-long-enough-ok"
+
+
+def _call(client, method, path, **kwargs):
+    return client.request(method, path, **kwargs)
+
+
+# (method, path, needs the ordinary key?)
+ROUTES = [
+    ("POST", "/api/analyze", True),
+    ("POST", "/api/redact", True),
+    ("POST", "/api/restore", True),
+    ("GET", "/api/policy", True),
+    ("DELETE", "/api/sessions/whatever", True),
+    ("GET", "/api/health", False),
+    ("GET", "/api/config", False),
+    ("GET", "/", False),
+]
+
+
+@pytest.mark.parametrize("method,path,guarded", ROUTES)
+def test_every_route_is_open_when_no_key_is_set(client, monkeypatch, method, path, guarded):
+    """The single-user default: nothing is set, so nothing is gated."""
+    monkeypatch.delenv("REDACTION_API_KEY", raising=False)
+    monkeypatch.delenv("REDACTION_ADMIN_KEY", raising=False)
+    body = {"text": PROMPT, "engine": ENGINE} if method == "POST" else None
+    if path == "/api/restore":
+        body = {"text": "nothing", "session_id": "missing"}
+
+    assert _call(client, method, path, json=body).status_code != 401
+
+
+@pytest.mark.parametrize("method,path,guarded", ROUTES)
+def test_route_guarding_matches_the_documented_table(client, monkeypatch, method, path, guarded):
+    monkeypatch.setenv("REDACTION_API_KEY", KEY)
+    monkeypatch.delenv("REDACTION_ADMIN_KEY", raising=False)
+    body = {"text": PROMPT, "engine": ENGINE} if method == "POST" else None
+    if path == "/api/restore":
+        body = {"text": "nothing", "session_id": "missing"}
+
+    unauthenticated = _call(client, method, path, json=body)
+    if guarded:
+        assert unauthenticated.status_code == 401, path
+        authenticated = _call(client, method, path, json=body, headers={"X-Redaction-Key": KEY})
+        assert authenticated.status_code != 401, path
+    else:
+        assert unauthenticated.status_code != 401, path
+
+
+def test_clearing_every_session_is_not_open_to_anonymous_callers(client, monkeypatch):
+    """The regression test. This route used to need no key at all, and it discards
+    every client's mapping -- so an anonymous POST could break everyone's restore."""
+    monkeypatch.setenv("REDACTION_API_KEY", KEY)
+    monkeypatch.delenv("REDACTION_ADMIN_KEY", raising=False)
+
+    assert client.post("/api/sessions/clear").status_code == 401
+    # With no admin key configured it falls back to the ordinary key rather than
+    # leaving the route unreachable.
+    assert client.post(
+        "/api/sessions/clear", headers={"X-Redaction-Key": KEY}
+    ).status_code == 200
+
+
+def test_admin_key_separates_the_instance_wide_clear(client, monkeypatch):
+    monkeypatch.setenv("REDACTION_API_KEY", KEY)
+    monkeypatch.setenv("REDACTION_ADMIN_KEY", ADMIN)
+
+    assert client.post("/api/sessions/clear").status_code == 401
+    # Once an admin key exists the ordinary key is no longer enough for it.
+    assert client.post(
+        "/api/sessions/clear", headers={"X-Redaction-Key": KEY}
+    ).status_code == 401
+    assert client.post(
+        "/api/sessions/clear", headers={"X-Redaction-Admin-Key": ADMIN}
+    ).status_code == 200
+
+
+def test_deleting_one_session_leaves_the_others_alone(client, monkeypatch):
+    monkeypatch.delenv("REDACTION_API_KEY", raising=False)
+    first = redact(client)["session_id"]
+    second = redact(client)["session_id"]
+    assert first and second and first != second
+
+    dropped = client.delete("/api/sessions/" + first)
+    assert dropped.status_code == 200
+    assert dropped.json() == {"cleared": 1}
+
+    # The other session still restores, which is the whole point of scoping the delete.
+    still_there = client.post(
+        "/api/restore", json={"text": "<PERSON_1>", "session_id": second}
+    )
+    assert still_there.status_code == 200
+
+    # Deleting something already gone is not an error: the caller wanted it gone.
+    assert client.delete("/api/sessions/" + first).json() == {"cleared": 0}
+
+
+def test_config_reports_whether_a_key_is_needed_without_leaking_it(client, monkeypatch):
+    monkeypatch.delenv("REDACTION_API_KEY", raising=False)
+    monkeypatch.delenv("REDACTION_ADMIN_KEY", raising=False)
+    body = client.get("/api/config").json()
+    assert body["auth_required"] is False
+    assert body["admin_auth_required"] is False
+
+    monkeypatch.setenv("REDACTION_API_KEY", KEY)
+    body = client.get("/api/config").json()
+    assert body["auth_required"] is True
+    # No admin key set, so the fallback means the admin route is still guarded.
+    assert body["admin_auth_required"] is True
+    assert KEY not in json.dumps(body)
+
+
+def test_health_does_not_report_usage(client):
+    """It is open so load balancers can probe it, so it carries no live session count."""
+    body = client.get("/api/health").json()
+    assert body["status"] == "ok"
+    assert "active_sessions" not in body
+
+
+@pytest.mark.parametrize(
+    "override,api_key,expected",
+    [
+        ("", None, True),        # local install: docs on, as the README says
+        ("", "a-key", False),    # keyed instance: docs off, they cannot send a key
+        ("1", "a-key", True),    # explicit opt-in wins
+        ("0", None, False),      # explicit opt-out wins
+    ],
+)
+def test_docs_follow_the_key_unless_overridden(monkeypatch, override, api_key, expected):
+    from app import main
+
+    monkeypatch.setenv("REDACTION_ENABLE_DOCS", override)
+    if api_key:
+        monkeypatch.setenv("REDACTION_API_KEY", api_key)
+    else:
+        monkeypatch.delenv("REDACTION_API_KEY", raising=False)
+
+    assert main._docs_enabled() is expected

@@ -19,6 +19,7 @@
     entities: null,         // Set of enabled entity types, or null for "all"
     recognizers: [],
     sessionId: null,
+    apiKey: null,           // only ever set when the instance reports auth_required
     findings: [],
     sort: { key: "score", dir: -1 },
     seq: 0                  // guards against out-of-order analyze responses
@@ -67,14 +68,63 @@
     el.className = "pill pill-" + (kind || "muted");
   }
 
-  function api(path, body) {
+  /* --- instance key --------------------------------------------------------- */
+  /* Only in play when the instance sets REDACTION_API_KEY. It lives in sessionStorage
+     so it is gone when the tab closes, and every access is guarded because a browser
+     with site data blocked throws on the property itself rather than returning null. */
+
+  var KEY_STORAGE = "prs.apiKey";
+
+  function readStoredKey() {
+    try { return window.sessionStorage.getItem(KEY_STORAGE) || null; }
+    catch (err) { return null; }
+  }
+
+  function storeKey(value) {
+    try {
+      if (value) { window.sessionStorage.setItem(KEY_STORAGE, value); }
+      else { window.sessionStorage.removeItem(KEY_STORAGE); }
+    } catch (err) { /* the key still works for this page; it just will not persist */ }
+  }
+
+  function showAuthLock(message) {
+    var lock = $("auth-lock");
+    lock.hidden = false;
+    lock.className = "auth-lock" + (message ? " is-error" : "");
+    if (message) { toast(message, true); }
+    $("auth-key").focus();
+  }
+
+  function saveKeyFromInput() {
+    var input = $("auth-key");
+    var value = input.value.trim();
+    if (!value) { showAuthLock("Enter the key for this instance."); return; }
+
+    state.apiKey = value;
+    storeKey(value);
+    input.value = "";
+    $("auth-lock").hidden = true;
+    $("auth-lock").className = "auth-lock";
+    toast("Key saved for this tab");
+    // Prove it immediately rather than leaving the user to discover it at the next action.
+    analyze();
+  }
+
+  function api(path, body, method) {
+    var headers = { "Content-Type": "application/json" };
+    if (state.apiKey) { headers["X-Redaction-Key"] = state.apiKey; }
+
     return fetch(path, {
-      method: body ? "POST" : "GET",
-      headers: { "Content-Type": "application/json" },
+      method: method || (body ? "POST" : "GET"),
+      headers: headers,
       body: body ? JSON.stringify(body) : undefined
     }).then(function (response) {
       return response.json().then(function (data) {
         if (!response.ok) {
+          if (response.status === 401) {
+            // Wrong key, or none yet. Ask for it rather than reporting a bare 401.
+            showAuthLock("This instance needs a key. Enter it to continue.");
+          }
           throw new Error(data && data.detail ? data.detail : "Request failed (" + response.status + ")");
         }
         return data;
@@ -738,12 +788,31 @@
     });
 
     $("btn-clear-sessions").addEventListener("click", function () {
-      api("/api/sessions/clear", {}).then(function (data) {
+      // Drops this page's own mapping, not the whole instance's. Clearing every
+      // client's mappings is an operator action and needs the admin key.
+      function forgetLocally() {
         state.sessionId = null;
         $("btn-restore").disabled = true;
         renderMapping({});
-        toast("Cleared " + data.cleared + " stored mapping(s)");
-      }).catch(function (err) { toast(err.message, true); });
+      }
+
+      if (!state.sessionId) {
+        forgetLocally();
+        toast("Nothing stored to clear");
+        return;
+      }
+
+      api("/api/sessions/" + encodeURIComponent(state.sessionId), null, "DELETE")
+        .then(function (data) {
+          forgetLocally();
+          toast("Cleared " + data.cleared + " stored mapping(s)");
+        })
+        .catch(function (err) { toast(err.message, true); });
+    });
+
+    $("btn-auth-save").addEventListener("click", saveKeyFromInput);
+    $("auth-key").addEventListener("keydown", function (event) {
+      if (event.key === "Enter") { saveKeyFromInput(); }
     });
 
     document.querySelectorAll("[data-select-all]").forEach(function (button) {
@@ -772,8 +841,15 @@
 
   /* --- boot ----------------------------------------------------------------- */
 
+  state.apiKey = readStoredKey();
+
   api("/api/config").then(function (config) {
     state.config = config;
+    // /api/config is open precisely so this can happen: the page has to load before it
+    // can find out a key is required. A local install reports false and shows nothing.
+    if (config.auth_required && !state.apiKey) {
+      showAuthLock(null);
+    }
     renderEngines(config);
     renderOperatorSelect($("default-operator"), config.default_operator);
     refreshDefaultOperator();

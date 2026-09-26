@@ -69,6 +69,18 @@ body {
 .topbar h1 { margin: 0; font-size: 17px; font-weight: 650; letter-spacing: -0.01em; }
 .topbar p { margin: 1px 0 0; font-size: 12.5px; color: var(--ink-soft); }
 .topbar-actions { display: flex; align-items: center; gap: 10px; }
+.auth-lock { display: flex; align-items: center; gap: 6px; }
+/* display:flex would otherwise beat the UA stylesheet's [hidden] rule, leaving the
+   unlock field on screen for instances that need no key at all. */
+.auth-lock[hidden] { display: none; }
+.auth-lock-mark { font-size: 13px; opacity: 0.75; }
+.auth-key {
+  width: 150px; padding: 5px 8px; font-size: 12.5px; font-family: inherit;
+  color: var(--ink); background: var(--panel); border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.auth-key:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.auth-lock.is-error .auth-key { border-color: var(--danger); }
 
 /* --- layout ----------------------------------------------------------------- */
 
