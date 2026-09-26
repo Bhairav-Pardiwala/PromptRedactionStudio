@@ -113,9 +113,11 @@ alongside it.
 
 1. Open <http://localhost:8000>. The box is pre-filled with a sample prompt — findings
    appear as you type, highlighted in place and listed with their confidence scores.
-2. Click **Redact**. Each distinct value becomes a numbered token: `<PERSON_1>`,
+2. Missed something? Select it, right-click, and pick a label — **Redact as PERSON**, or
+   any label you type. It is redacted from then on, every occurrence of it.
+3. Click **Redact**. Each distinct value becomes a numbered token: `<PERSON_1>`,
    `<EMAIL_ADDRESS_1>`. The same person mentioned five times keeps the same token.
-3. Copy the redacted prompt, send it to a model, and paste its reply into the **restore**
+4. Copy the redacted prompt, send it to a model, and paste its reply into the **restore**
    box. Real values go back in, and you're told how many tokens came back.
 
 ![The restore panel putting real values back into a model's JSON reply, reporting 18 of 18 tokens restored](docs/web-ui-restore.png)
@@ -211,7 +213,7 @@ It is not a statement that the code is free of bugs — see the note at the bott
 ## Tests
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests\ -v     # 40 backend tests
+.\.venv\Scripts\python.exe -m pytest tests\ -v     # 68 backend tests
 dotnet test tray.Tests                             # 25 desktop client tests
 ```
 

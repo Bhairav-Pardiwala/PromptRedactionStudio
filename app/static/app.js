@@ -658,6 +658,10 @@
       nameInput.value = recognizer.name;
       nameInput.addEventListener("input", function () {
         recognizer.name = nameInput.value;
+        // A card created by right-click pins `entity` so the term keeps the label it was
+        // marked with. Renaming the card by hand hands that back to the name, which is how
+        // a hand-built recognizer has always behaved.
+        delete recognizer.entity;
         scheduleAnalyze();
       });
       card.appendChild(nameInput);
@@ -730,6 +734,405 @@
     });
   }
 
+  /* --- mark a selection for redaction -------------------------------------- */
+  /* Right-clicking a selection in the prompt offers to redact it. The mechanism is the
+     deny-list custom recognizer that already exists, so a marked term needs no special
+     casing anywhere downstream -- and because redaction.analyze() folds custom entity
+     types back into the requested list, a term marked as PERSON is still found even when
+     PERSON itself is unchecked. */
+
+  var MAX_MARK_CHARS = 200;
+  var MARK_MENU_ENTITIES = 6;   // past this the menu is longer than it is useful
+
+  var pendingSelection = null;  // snapshot taken at right-click; see openMarkMenu
+  var menuOpen = false;
+  var recognizersRevealed = false;
+
+  /* Mirrors _slugify_entity in recognizers.py, so state.recognizers[].entity is exactly
+     the type the server will report back -- which keeps the menu's colour, the findings
+     tag and the token all in agreement from the first render. */
+  function slugifyEntity(name) {
+    var slug = name.replace(/[^A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "").toUpperCase();
+    return slug || "CUSTOM";
+  }
+
+  /* Presidio compiles a deny-list to (?:^|(?<=\W))(terms)(?:(?=\W)|$), so a term that
+     starts or ends mid-word can never match. Refusing up front beats accepting a mark
+     that then silently fails to redact anything. */
+  function isWholeWord(text, start, end) {
+    var before = start > 0 ? text.charAt(start - 1) : "";
+    var after = end < text.length ? text.charAt(end) : "";
+    return (!before || /\W/.test(before)) && (!after || /\W/.test(after));
+  }
+
+  /* Right-clicking something Presidio already found should act on the whole finding, not
+     on the fragment the pointer happened to land in -- otherwise "Never redact" over a
+     detected email would allow-list half of it. So the span is grown outward to cover
+     every finding it touches, repeatedly, because findings overlap: a click on the URL
+     that Presidio sees inside an address pulls in the wider EMAIL_ADDRESS with it.
+
+     Findings can be a beat behind the text, since analyze() is debounced. A finding whose
+     recorded text no longer sits at its offsets is stale, and ignored rather than trusted. */
+  function expandToFindings(text, start, end) {
+    var span = { start: start, end: end };
+
+    for (var pass = 0; pass < 5; pass++) {
+      var grew = false;
+      state.findings.forEach(function (finding) {
+        if (text.slice(finding.start, finding.end) !== finding.text) { return; }
+
+        // A collapsed caret counts as inside a finding it merely touches; a real selection
+        // has to genuinely overlap one.
+        var touches = span.start === span.end
+          ? finding.start <= span.start && span.start <= finding.end
+          : finding.start < span.end && span.start < finding.end;
+        if (!touches) { return; }
+
+        if (finding.start < span.start) { span.start = finding.start; grew = true; }
+        if (finding.end > span.end) { span.end = finding.end; grew = true; }
+      });
+      if (!grew) { break; }
+    }
+    return span;
+  }
+
+  /* The snapshot is what every menu action works from. A textarea stops painting its
+     selection once focus moves to a menu button, so reading selectionStart later would be
+     unreliable -- the captured offsets are not. */
+  function captureSelection() {
+    var prompt = $("prompt");
+    var start = prompt.selectionStart;
+    var end = prompt.selectionEnd;
+    if (start == null || end == null) { return null; }
+
+    var text = prompt.value;
+    // Chrome moves the caret to the click before firing contextmenu, so a collapsed caret
+    // is a usable position: right-clicking a highlighted value with nothing selected marks
+    // that whole value. A caret outside every finding still means "no selection".
+    var span = expandToFindings(text, start, end);
+    if (span.start === span.end) { return null; }
+
+    var raw = text.slice(span.start, span.end);
+    var trimmed = raw.trim();
+    if (!trimmed) { return null; }
+    var lead = raw.length - raw.replace(/^\s+/, "").length;
+
+    return {
+      text: trimmed,
+      start: span.start + lead,
+      end: span.start + lead + trimmed.length
+    };
+  }
+
+  /* The types a person actually reaches for when a detector missed something. This only
+     ranks the menu -- what exists still comes from /api/config, and anything outside this
+     list is still reachable through "Redact as...". Without a ranking the menu would follow
+     default_entities, which is alphabetical, and offer CRYPTO and IBAN_CODE while burying
+     PERSON. */
+  var MARK_PREFERRED = [
+    "PERSON", "ORGANIZATION", "LOCATION", "EMAIL_ADDRESS", "PHONE_NUMBER",
+    "DATE_TIME", "URL", "CREDIT_CARD", "US_SSN"
+  ];
+
+  /* Offered from every supported type rather than the checked ones, because marking works
+     regardless of the checkboxes -- turning PERSON detection off for being noisy is a good
+     reason to mark one name by hand, not a reason to hide the label. CUSTOM leads: it is
+     the answer when none of the built-in types fit. */
+  function markableEntities() {
+    var config = state.config || {};
+    var supported = config.all_entities || config.default_entities || [];
+    var offered = ["CUSTOM"];
+
+    MARK_PREFERRED.concat(supported).forEach(function (entity) {
+      if (entity !== "CUSTOM" && supported.indexOf(entity) !== -1
+          && offered.indexOf(entity) === -1 && offered.length <= MARK_MENU_ENTITIES) {
+        offered.push(entity);
+      }
+    });
+    return offered;
+  }
+
+  function reveal(element) {
+    var group = element.closest("details");
+    if (group) { group.open = true; }
+  }
+
+  /* --- the menu itself ------------------------------------------------------ */
+
+  function menuItems() {
+    return Array.prototype.slice.call($("mark-menu").querySelectorAll(".ctx-menu-item"));
+  }
+
+  /* Focus carries the highlight, so Enter and Space activate an item natively and the
+     keyboard path needs no extra key handling. preventScroll matters: focusing an item
+     must not scroll the page, because the scroll listener below closes the menu. */
+  function setActiveItem(index) {
+    var items = menuItems();
+    if (!items.length) { return; }
+    var wrapped = ((index % items.length) + items.length) % items.length;
+    items.forEach(function (item, i) { item.classList.toggle("is-active", i === wrapped); });
+    items[wrapped].focus({ preventScroll: true });
+  }
+
+  function onDocPointerDown(event) {
+    if (!$("mark-menu").contains(event.target)) { closeMarkMenu(false); }
+  }
+
+  function onMenuDismiss() { closeMarkMenu(false); }
+
+  function onMenuKeydown(event) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeMarkMenu(true);
+      return;
+    }
+    // The "Redact as..." row swaps in a text input; leave its own key handling alone.
+    if (document.activeElement && document.activeElement.tagName === "INPUT") { return; }
+
+    var items = menuItems();
+    if (!items.length) { return; }
+    var current = items.indexOf(document.activeElement);
+
+    if (event.key === "ArrowDown") { event.preventDefault(); setActiveItem(current + 1); }
+    else if (event.key === "ArrowUp") { event.preventDefault(); setActiveItem(current < 0 ? -1 : current - 1); }
+    else if (event.key === "Home") { event.preventDefault(); setActiveItem(0); }
+    else if (event.key === "End") { event.preventDefault(); setActiveItem(items.length - 1); }
+  }
+
+  function closeMarkMenu(restoreSelection) {
+    if (!menuOpen) { return; }
+    menuOpen = false;
+
+    var menu = $("mark-menu");
+    menu.hidden = true;
+    menu.innerHTML = "";
+
+    document.removeEventListener("pointerdown", onDocPointerDown, true);
+    document.removeEventListener("keydown", onMenuKeydown, true);
+    document.removeEventListener("scroll", onMenuDismiss, true);
+    window.removeEventListener("resize", onMenuDismiss);
+    window.removeEventListener("blur", onMenuDismiss);
+
+    // Escape and a completed action put the user back where they were; clicking away does
+    // not, because they have chosen to be somewhere else.
+    if (restoreSelection && pendingSelection) {
+      var prompt = $("prompt");
+      prompt.focus();
+      prompt.setSelectionRange(pendingSelection.start, pendingSelection.end);
+    }
+  }
+
+  function menuSeparator() {
+    var separator = document.createElement("div");
+    separator.className = "ctx-menu-sep";
+    return separator;
+  }
+
+  function menuButton(label) {
+    var button = document.createElement("button");
+    button.type = "button";
+    button.className = "ctx-menu-item";
+    button.setAttribute("role", "menuitem");
+    var text = document.createElement("span");
+    text.textContent = label;
+    button.appendChild(text);
+    return button;
+  }
+
+  function markMenuItem(entity, selection) {
+    var button = menuButton("Redact as");
+    var tag = document.createElement("span");
+    tag.className = "tag";
+    tag.setAttribute("style", entityStyle(entity));
+    tag.textContent = entity;
+    button.appendChild(tag);
+    button.addEventListener("click", function () {
+      closeMarkMenu(true);
+      markTerm(selection.text, entity);
+    });
+    return button;
+  }
+
+  /* A native prompt() would block the page, so the label is typed inline instead. */
+  function showLabelInput(selection) {
+    var menu = $("mark-menu");
+    menu.innerHTML = "";
+
+    var head = document.createElement("div");
+    head.className = "ctx-menu-head";
+    head.textContent = "Label for “" + selection.text + "”";
+    head.title = selection.text;
+    menu.appendChild(head);
+
+    var row = document.createElement("div");
+    row.className = "ctx-menu-label";
+
+    var input = document.createElement("input");
+    input.type = "text";
+    input.placeholder = "e.g. Project code";
+    input.spellcheck = false;
+
+    var apply = document.createElement("button");
+    apply.type = "button";
+    apply.className = "btn btn-tiny btn-primary";
+    apply.textContent = "Mark";
+
+    function commit() {
+      var label = input.value.trim();
+      if (!label) { input.focus(); return; }
+      closeMarkMenu(true);
+      markTerm(selection.text, label);
+    }
+
+    input.addEventListener("keydown", function (event) {
+      if (event.key === "Enter") { event.preventDefault(); commit(); }
+    });
+    apply.addEventListener("click", commit);
+
+    row.appendChild(input);
+    row.appendChild(apply);
+    menu.appendChild(row);
+    input.focus({ preventScroll: true });
+  }
+
+  function buildMarkMenu(selection) {
+    var menu = $("mark-menu");
+    menu.innerHTML = "";
+
+    var head = document.createElement("div");
+    head.className = "ctx-menu-head";
+    head.textContent = "“" + selection.text + "”";
+    head.title = selection.text;
+    menu.appendChild(head);
+    menu.appendChild(menuSeparator());
+
+    markableEntities().forEach(function (entity) {
+      menu.appendChild(markMenuItem(entity, selection));
+    });
+
+    var custom = menuButton("Redact as…");
+    custom.addEventListener("click", function () { showLabelInput(selection); });
+    menu.appendChild(custom);
+
+    menu.appendChild(menuSeparator());
+
+    var allow = menuButton("Never redact (allow-list)");
+    allow.addEventListener("click", function () {
+      closeMarkMenu(true);
+      addToAllowList(selection.text);
+    });
+    menu.appendChild(allow);
+
+    return menu;
+  }
+
+  function positionMenu(menu, x, y) {
+    // Unhide at the origin first: the menu has to be laid out before it can be measured.
+    menu.style.left = "0px";
+    menu.style.top = "0px";
+    menu.hidden = false;
+
+    var width = menu.offsetWidth;
+    var height = menu.offsetHeight;
+    var left = Math.max(6, Math.min(x + 2, window.innerWidth - width - 6));
+    var top = y + 2;
+    if (top + height > window.innerHeight - 6) { top = Math.max(6, y - height - 2); }
+
+    menu.style.left = left + "px";
+    menu.style.top = top + "px";
+  }
+
+  function openMarkMenu(event) {
+    var prompt = $("prompt");
+    var selection = captureSelection();
+    // Nothing selected: leave the browser's own menu alone so copy and paste still work.
+    if (!selection) { return; }
+
+    event.preventDefault();
+
+    if (selection.text.length > MAX_MARK_CHARS) {
+      toast("That selection is too long to mark — pick a word or short phrase.", true);
+      return;
+    }
+    if (!isWholeWord(prompt.value, selection.start, selection.end)) {
+      toast("Select whole words — a deny-list only matches on word boundaries.", true);
+      return;
+    }
+
+    pendingSelection = selection;
+    // Paint the span the menu is about to act on. It is usually what the user selected,
+    // but a click inside a finding will have grown outward to the whole value, and that
+    // should be visible before they pick a label rather than a surprise afterwards.
+    prompt.setSelectionRange(selection.start, selection.end);
+
+    var menu = buildMarkMenu(selection);
+
+    // Shift+F10 and the Windows menu key report no usable coordinates; anchor to the editor.
+    var x = event.clientX;
+    var y = event.clientY;
+    if ((!x && !y) || x < 0 || y < 0) {
+      var box = prompt.getBoundingClientRect();
+      x = box.left + 12;
+      y = box.top + 12;
+    }
+    positionMenu(menu, x, y);
+
+    menuOpen = true;
+    setActiveItem(0);
+
+    document.addEventListener("pointerdown", onDocPointerDown, true);
+    document.addEventListener("keydown", onMenuKeydown, true);
+    document.addEventListener("scroll", onMenuDismiss, true);
+    window.addEventListener("resize", onMenuDismiss);
+    window.addEventListener("blur", onMenuDismiss);
+  }
+
+  /* --- the two actions ------------------------------------------------------ */
+
+  /* One auto-managed deny-list recognizer per label, so marking three names as PERSON
+     produces one card holding three terms rather than three cards. */
+  function markTerm(term, label) {
+    var entity = slugifyEntity(label);
+    var existing = null;
+    state.recognizers.forEach(function (recognizer) {
+      if (recognizer.kind === "deny_list" && recognizer.entity === entity) { existing = recognizer; }
+    });
+
+    if (!existing) {
+      // score 1 clears any threshold the slider can produce, and wins Presidio's conflict
+      // resolution against a lower-scoring detection over the same span.
+      existing = { name: entity, entity: entity, kind: "deny_list", deny_list: [], score: 1 };
+      state.recognizers.push(existing);
+    }
+
+    var lower = term.toLowerCase();
+    var already = (existing.deny_list || []).some(function (marked) {
+      return marked.toLowerCase() === lower;    // the matching is case-insensitive too
+    });
+    if (already) { toast("Already marked as " + entity); return; }
+
+    existing.deny_list.push(term);
+    if (!recognizersRevealed) {
+      recognizersRevealed = true;
+      reveal($("recognizer-list"));   // show the user where the term landed, once
+    }
+    renderRecognizers();
+    analyze();
+    toast("Marked “" + term + "” as " + entity);
+  }
+
+  function addToAllowList(term) {
+    var box = $("allow-list");
+    var lines = box.value.split("\n").map(function (line) { return line.trim(); });
+    if (lines.indexOf(term) !== -1) { toast("Already in the allow-list"); return; }
+
+    var body = box.value.replace(/\s+$/, "");
+    box.value = body ? body + "\n" + term : term;
+    reveal(box);
+    analyze();
+    toast("“" + term + "” will never be redacted");
+  }
+
   /* --- wiring --------------------------------------------------------------- */
 
   function bindEvents() {
@@ -738,6 +1141,7 @@
       renderHighlights(state.findings);   // repaint immediately so text stays legible
       scheduleAnalyze();
     });
+    prompt.addEventListener("contextmenu", openMarkMenu);
     prompt.addEventListener("scroll", function () {
       $("highlights").scrollTop = prompt.scrollTop;
       $("highlights").scrollLeft = prompt.scrollLeft;
