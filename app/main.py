@@ -8,7 +8,6 @@ from __future__ import annotations
 import logging
 import os
 import secrets
-from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -34,9 +33,6 @@ ADMIN_KEY_ENV = "REDACTION_ADMIN_KEY"
 ADMIN_KEY_HEADER = "X-Redaction-Admin-Key"
 DOCS_ENV = "REDACTION_ENABLE_DOCS"
 
-# Not enforced -- a short key is the operator's decision -- but it is worth one warning.
-MIN_KEY_CHARS = 32
-
 
 def _docs_enabled() -> bool:
     """Whether the interactive API docs are served.
@@ -54,57 +50,12 @@ def _docs_enabled() -> bool:
     return not os.environ.get(API_KEY_ENV)
 
 
-def _log_auth_status() -> None:
-    """Say once, at startup, whether authentication is on.
-
-    Every key is reduced to a bool or a name before anything is logged, so no code path
-    here can reach a logger while still holding a key. Not even its length: that is a
-    small thing to hand an attacker, and it is of no use to the operator either.
-    """
-    configured = {
-        name: bool(os.environ.get(name)) for name in (API_KEY_ENV, ADMIN_KEY_ENV)
-    }
-    too_short = [
-        name
-        for name in (API_KEY_ENV, ADMIN_KEY_ENV)
-        if 0 < len(os.environ.get(name) or "") < MIN_KEY_CHARS
-    ]
-
-    if not any(configured.values()):
-        logger.info("Authentication is off (%s unset): every route is open.", API_KEY_ENV)
-        return
-
-    logger.info(
-        "Authentication is on. %s: %s. %s: %s.",
-        API_KEY_HEADER,
-        "required" if configured[API_KEY_ENV] else "not set",
-        ADMIN_KEY_HEADER,
-        "required for /api/sessions/clear"
-        if configured[ADMIN_KEY_ENV]
-        else "not set, falling back to " + API_KEY_HEADER,
-    )
-    for name in too_short:
-        logger.warning(
-            "%s is shorter than %d characters; a longer key is recommended.",
-            name,
-            MIN_KEY_CHARS,
-        )
-
-
-@asynccontextmanager
-async def lifespan(_app: FastAPI):
-    # An operator otherwise has no way to confirm a key took effect except by getting a 401.
-    _log_auth_status()
-    yield
-
-
 _DOCS = _docs_enabled()
 
 app = FastAPI(
     title="Prompt Redaction Studio",
     description="Redact PII from LLM prompts with Microsoft Presidio, then restore it.",
     version="1.0.0",
-    lifespan=lifespan,
     docs_url="/docs" if _DOCS else None,
     redoc_url="/redoc" if _DOCS else None,
     openapi_url="/openapi.json" if _DOCS else None,

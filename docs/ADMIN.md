@@ -206,8 +206,10 @@ Every variable is optional. With none set, the server is open — the single-use
 
 `/api/health` and `/api/config` stay open: load balancers probe the first, and the website
 needs the second to know whether to ask for a key. Neither returns a key or prompt content.
-At startup the server logs whether authentication is on, and warns about keys under 32
-characters. It never logs a key.
+
+To confirm a key took effect, ask the instance rather than reading its logs:
+`curl -s https://redaction.corp.example.com/api/config` reports `auth_required` and
+`admin_auth_required` as the running server sees them. The server never logs a key.
 
 **Memory:** about 1 GB once the large language model is loaded.
 `--build-arg INCLUDE_LARGE_MODEL=false` halves it, at a real cost in detection quality.

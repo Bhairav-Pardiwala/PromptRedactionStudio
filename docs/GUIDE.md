@@ -247,8 +247,8 @@ REDACTION_API_KEY=... uvicorn app.main:app --port 8000
 The keys are read per request rather than at import, but a process cannot have its
 environment changed from the outside — so in practice rotating a key means restarting the
 server. Clients pick up a new key as soon as it is entered; no redaction already performed
-is affected either way. The server logs one line at startup saying whether authentication
-is on, and warns if a key is shorter than 32 characters. It never logs the key itself.
+is affected either way. To confirm a key took effect, ask the running instance:
+`GET /api/config` reports `auth_required`. The server never logs a key.
 
 **The browser UI works with a key set.** When `/api/config` reports `auth_required`, the
 page shows a small unlock field in the header. The key is held in `sessionStorage`, so it
