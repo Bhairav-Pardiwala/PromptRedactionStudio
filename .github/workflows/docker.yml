@@ -11,7 +11,7 @@ on:
     inputs:
       version:
         description: "Version to tag the image with (alongside latest)"
-        default: "1.0.0"
+        default: "1.1.0"
         required: true
 
 permissions:
