@@ -141,6 +141,11 @@ Docker is the way in.
 
 ### How it is meant to be deployed across an organisation
 
+> **Deploying this to a team?** [**docs/ADMIN.md**](ADMIN.md) is the configuration
+> guide for administrators: deployment modes, server variables, SSO behind a reverse
+> proxy, identity provider registration, and fleet-deploying the desktop client with
+> `managed.json`. This section is the overview.
+
 Your organisation runs one instance of the server (the Docker image), and each employee
 points the tray app at it. One client, many backends.
 
@@ -191,9 +196,28 @@ it always did.
 
 ### Authentication
 
-By default there is none — the instance is expected to sit on a trusted network. Set
-`REDACTION_API_KEY` on the server to require an `X-Redaction-Key` header, and enter the
-same value in the tray app's Settings. Leaving it unset disables the check entirely.
+Full configuration, including SSO, is in the
+[administrator guide](ADMIN.md#server-configuration). In short:
+
+By default there is none, and for one person on one laptop that is the right default —
+nothing below applies until you set an environment variable on the **server**.
+
+A shared instance sets one or both of these:
+
+| Variable | Header | Guards |
+|---|---|---|
+| `REDACTION_API_KEY` | `X-Redaction-Key` | `/api/analyze`, `/api/redact`, `/api/restore`, `/api/policy`, `DELETE /api/sessions/{id}` |
+| `REDACTION_ADMIN_KEY` | `X-Redaction-Admin-Key` | `POST /api/sessions/clear` |
+
+`POST /api/sessions/clear` discards **every** client's mapping, so it is held separately
+from everyday use. When `REDACTION_ADMIN_KEY` is unset it falls back to
+`REDACTION_API_KEY`, so a single-key deployment does not leave a destructive route
+unauthenticated; when it is set, the ordinary key no longer opens it.
+
+`/api/health` and `/api/config` stay open. Health is what a load balancer probes, and it
+reports no usage. Config carries the entity and operator inventory — identical in every
+install — plus the `auth_required` flag the browser UI needs in order to know it should
+ask you for a key. Neither returns a key or any prompt content.
 
 It is an environment variable on the **server** process, wherever that runs:
 
@@ -203,12 +227,13 @@ docker run --rm -p 8000:8000 -e REDACTION_API_KEY="$REDACTION_API_KEY" \
 ```
 
 ```yaml
-# docker-compose.yml — the value comes from the environment or a .env file,
-# so the key itself is never committed.
+# docker-compose.yml — the values come from the environment or a .env file,
+# so the keys themselves are never committed.
 services:
   app:
     environment:
       REDACTION_API_KEY: ${REDACTION_API_KEY:?set REDACTION_API_KEY before composing up}
+      REDACTION_ADMIN_KEY: ${REDACTION_ADMIN_KEY:-}
 ```
 
 ```powershell
@@ -219,19 +244,32 @@ $env:REDACTION_API_KEY = "..."    # then .\run.ps1, which inherits it
 REDACTION_API_KEY=... uvicorn app.main:app --port 8000
 ```
 
-`require_api_key` (`app/main.py:136`) reads the variable on every request rather than at
-import, but a process cannot have its environment changed from the outside — so in practice
-rotating the key means restarting the server. Clients pick up a new key as soon as it is
-entered in Settings; no redaction already performed is affected either way.
+The keys are read per request rather than at import, but a process cannot have its
+environment changed from the outside — so in practice rotating a key means restarting the
+server. Clients pick up a new key as soon as it is entered; no redaction already performed
+is affected either way. The server logs one line at startup saying whether authentication
+is on, and warns if a key is shorter than 32 characters. It never logs the key itself.
 
-Three routes enforce it — `/api/analyze`, `/api/redact` and `/api/restore`. `/api/health`,
-`/api/config`, `/api/policy` and `/api/sessions/clear` stay open: the first three expose no
-prompt content, and clearing sessions only ever discards data.
+**The browser UI works with a key set.** When `/api/config` reports `auth_required`, the
+page shows a small unlock field in the header. The key is held in `sessionStorage`, so it
+is gone when the tab closes and is never written to disk. The desktop client has the same
+field in Settings and sends the header on every request.
 
-> **Setting a key disables the bundled web UI.** The page at `/` still loads, but its
-> requests carry no `X-Redaction-Key` header, so every detection returns 401. That is the
-> intended trade for a shared instance — the desktop client is the way in, and it has a
-> field for the key. Leave the variable unset on an instance whose browser UI people use.
+**`/docs` follows the key.** The interactive API docs are served on an instance with no
+key — they are the local development affordance the README points at — and are off once
+`REDACTION_API_KEY` is set, because a browser hitting `/docs` has no way to send the
+header, and a shared instance should not advertise its whole surface to anonymous
+callers. Set `REDACTION_ENABLE_DOCS=1` to force them on, or `=0` to force them off.
+
+> **Use TLS.** Over plain HTTP the key, the prompt and the returned token mapping all
+> travel in the clear, and a bearer key on a cleartext channel buys confidence without
+> protection. Terminate TLS at a reverse proxy in front of the app.
+
+> **A shared key is access control, not attribution.** It can prove a request was
+> authorised. It can never say *who* made it, because every client sends the same secret.
+> If you need to know which person redacted or restored what, that has to come from an
+> authenticating reverse proxy in front of the app — oauth2-proxy, Entra Application
+> Proxy, Cloudflare Access — passing an identity header.
 
 ### Troubleshooting
 
@@ -250,7 +288,8 @@ start the app with `PRT_OPEN_SETTINGS=1` to open Settings directly.
 ## API
 
 The UI is a thin client over a JSON API; every option above is available directly.
-Interactive docs at `http://localhost:8000/docs`.
+Interactive docs at `http://localhost:8000/docs` on instances with no API key set
+(see [Authentication](#authentication)).
 
 | Route | Purpose |
 |---|---|
@@ -259,7 +298,8 @@ Interactive docs at `http://localhost:8000/docs`.
 | `POST /api/analyze` | detections only — type, offsets, score, explanation |
 | `POST /api/redact` | analyze + anonymize — redacted text, token map, session id |
 | `POST /api/restore` | put real values back into text containing tokens |
-| `POST /api/sessions/clear` | drop every stored mapping |
+| `DELETE /api/sessions/{id}` | drop one mapping — what a client clearing its own redaction wants |
+| `POST /api/sessions/clear` | drop **every** stored mapping, for every client (admin key) |
 | `GET /api/health` | liveness, which engines are warm |
 
 `POST /api/redact` accepts the full analyze request — `engine`, `entities`,
