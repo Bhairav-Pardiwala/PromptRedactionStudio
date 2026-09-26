@@ -10,6 +10,8 @@ namespace PromptRedactionTray.Views;
 public partial class SettingsWindow : Window
 {
     private readonly AppSettings _settings;
+    private readonly bool _hasSession;
+    private readonly bool _tokensProtected;
     private readonly RedactionClient _client;
 
     /// <summary>Raised after the user saves, so the app can re-apply everything.</summary>
@@ -20,10 +22,16 @@ public partial class SettingsWindow : Window
     {
     }
 
-    public SettingsWindow(AppSettings settings, RedactionClient client)
+    public SettingsWindow(
+        AppSettings settings,
+        RedactionClient client,
+        bool hasSession = false,
+        bool tokensProtected = false)
     {
         _settings = settings;
         _client = client;
+        _hasSession = hasSession;
+        _tokensProtected = tokensProtected;
         InitializeComponent();
 
         UrlBox.Text = settings.InstanceUrl;
@@ -32,9 +40,34 @@ public partial class SettingsWindow : Window
         RestoreHotkeyBox.Text = settings.RestoreHotkey;
         StartupBox.IsChecked = settings.StartWithWindows;
 
+        ShowSignInState();
+
         TestButton.Click += async (_, _) => await TestConnectionAsync();
         SaveButton.Click += (_, _) => Save();
         CancelButton.Click += (_, _) => Close();
+    }
+
+    /// <summary>
+    /// Report how this instance authenticates. Read-only by design: the identity provider
+    /// settings arrive in the machine-wide managed.json an administrator deploys, so
+    /// offering edit boxes here would invite someone to diverge from the fleet.
+    /// </summary>
+    private void ShowSignInState()
+    {
+        if (!_settings.UsesOidc)
+        {
+            SignInPanel.IsVisible = false;
+            return;
+        }
+
+        SignInPanel.IsVisible = true;
+        SignInStatus.Text = _hasSession
+            ? "Signed in. Tokens renew silently until the sign-in expires."
+            : "Not signed in. The next redaction will ask you to sign in.";
+        SignInIssuer.Text = "Identity provider: " + _settings.OidcIssuer;
+        SignInStorage.Text = _tokensProtected
+            ? "Sign-in is stored encrypted for your account on this machine."
+            : "Sign-in is stored in a file readable only by your account, but not encrypted.";
     }
 
     // No hand-written InitializeComponent here on purpose. Avalonia's name generator emits

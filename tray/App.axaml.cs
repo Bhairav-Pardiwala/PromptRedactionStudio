@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -16,11 +15,18 @@ namespace PromptRedactionTray;
 
 public partial class App : Application
 {
-    private readonly AppSettings _settings = AppSettings.Load();
+    private static readonly SettingsLoadResult _settingsLoad = AppSettings.Load();
+    private readonly AppSettings _settings = _settingsLoad.Settings;
     private readonly MappingStore _mappings = new();
     private readonly ClipboardService _clipboard = new();
     private readonly RedactionClient _client = new();
     private readonly HotkeyService _hotkeys = new();
+    private readonly TokenStore _tokens = new();
+
+    private OidcClient? _oidc;
+    private NativeMenuItem? _signInItem;
+    private NativeMenuItem? _openItem;
+    private NativeMenu? _menu;
 
     private TrayIcon? _trayIcon;
     private NativeMenuItem? _statusItem;
@@ -37,6 +43,21 @@ public partial class App : Application
             desktop.ShutdownMode = ShutdownMode.OnExplicitShutdown;
 
             Log.Write("--- starting, instance=" + _settings.InstanceUrl + " ---");
+            foreach (var source in _settingsLoad.Sources)
+            {
+                Log.Write("Settings from " + source);
+            }
+
+            if (_settingsLoad.ManagedFields.Count > 0)
+            {
+                Log.Write("Managed by policy: " + string.Join(", ", _settingsLoad.ManagedFields));
+            }
+
+            foreach (var problem in _settingsLoad.Problems)
+            {
+                // Loud, because falling back to defaults looks identical to working.
+                Log.Write("Settings problem: " + problem);
+            }
             try
             {
                 _clipboard.Initialise();
@@ -54,6 +75,17 @@ public partial class App : Application
             _hotkeys.HookFailed += message => Dispatcher.UIThread.Post(
                 () => ShowToast("Hotkeys unavailable", message, isError: true));
             _hotkeys.Start();
+
+            if (_settingsLoad.Problems.Count > 0)
+            {
+                // A configuration layer that could not be read is worth interrupting for:
+                // the app is running on defaults, which looks the same as running correctly.
+                Dispatcher.UIThread.Post(() => ShowToast(
+                    "Settings could not be read",
+                    string.Join(Environment.NewLine, _settingsLoad.Problems)
+                        + Environment.NewLine + "Running on defaults.",
+                    isError: true));
+            }
 
             _ = RefreshStatusAsync();
             StartHealthPolling();
@@ -74,6 +106,23 @@ public partial class App : Application
         _client.BaseUrl = _settings.InstanceUrl;
         _client.ApiKey = _settings.ApiKey;
 
+        if (_settings.UsesOidc)
+        {
+            _oidc = new OidcClient(_settings.OidcIssuer!, _settings.OidcClientId!, _settings.OidcScope);
+            _client.AccessTokenProvider = (force, ct) => GetAccessTokenAsync(force, ct);
+            if (!_tokens.IsProtectedAtRest)
+            {
+                // Said out loud rather than assumed: on this platform the refresh token is
+                // owner-readable on disk, not encrypted. See docs for the Keychain gap.
+                Log.Write("Sign-in tokens are stored unencrypted (owner-only file) on this platform");
+            }
+        }
+        else
+        {
+            _oidc = null;
+            _client.AccessTokenProvider = null;
+        }
+
         var invalid = _hotkeys.SetHotkeys(
             (_settings.RedactHotkey, () => Dispatcher.UIThread.Post(() => _ = RedactClipboardAsync())),
             (_settings.RestoreHotkey, () => Dispatcher.UIThread.Post(() => _ = RestoreClipboardAsync())));
@@ -85,6 +134,89 @@ public partial class App : Application
                 "Could not parse: " + string.Join(", ", invalid) + ". Check Settings.",
                 isError: true);
         }
+
+        // The instance may have changed to or from one that signs in, so the menu has to
+        // follow. Safe before the tray icon exists: it no-ops until the item is built.
+        UpdateSignInItem();
+    }
+
+    /// <summary>
+    /// A bearer token for the instance, renewing silently where possible. Never opens a
+    /// browser on its own: an unexpected sign-in window in the middle of a hotkey press
+    /// is the kind of surprise that makes people stop using the tool.
+    /// </summary>
+    private async Task<string?> GetAccessTokenAsync(bool forceRefresh, CancellationToken ct)
+    {
+        if (_oidc is null)
+        {
+            return null;
+        }
+
+        if (forceRefresh)
+        {
+            // The server rejected what we had, so the cached copy is worthless.
+            _tokens.Forget();
+            return null;
+        }
+
+        return await _tokens.GetAccessTokenAsync(_oidc, ct).ConfigureAwait(false);
+    }
+
+    private async Task SignInAsync()
+    {
+        if (_oidc is null)
+        {
+            ShowToast("Sign-in not configured", "This instance does not use an identity provider.");
+            return;
+        }
+
+        // Deliberately no ConfigureAwait(false) anywhere in this method. It starts on the UI
+        // thread from a menu click and must finish there: everything after the await
+        // touches the menu and the tray icon, which Avalonia only allows from the UI
+        // thread. Resuming on the thread pool is what made a successful sign-in report
+        // "the calling thread cannot access this object".
+        try
+        {
+            ShowToast("Signing in", "Complete the sign-in in your browser.");
+            var tokens = await _oidc.SignInAsync(BrowserLauncher.Open);
+            _tokens.Accept(tokens);
+            Log.Write("Signed in; token expires " + tokens.ExpiresAt.ToString("u"));
+            UpdateSignInItem();
+            ShowToast("Signed in", "The hotkeys are ready to use.");
+            await RefreshStatusAsync();
+        }
+        catch (OidcException exc)
+        {
+            Log.Write("Sign-in failed: " + exc.Message);
+            ShowToast("Sign-in failed", exc.Message, isError: true);
+        }
+        catch (Exception exc)
+        {
+            Log.Write("Sign-in error: " + exc);
+            ShowToast("Sign-in failed", exc.Message, isError: true);
+        }
+    }
+
+    private void SignOut()
+    {
+        _tokens.Forget();
+        UpdateSignInItem();
+        ShowToast("Signed out", "You will be asked to sign in on the next redaction.");
+        Log.Write("Signed out");
+    }
+
+    private void UpdateSignInItem()
+    {
+        if (_signInItem is null || _menu is null || _openItem is null)
+        {
+            return;
+        }
+
+        // Added or removed rather than hidden: IsVisible is only as reliable as each
+        // platform's native menu, and this one is a Win32 menu here and an NSMenu on macOS.
+        MenuLayout.SyncOptionalItem<NativeMenuItemBase>(
+            _menu.Items, _signInItem, _openItem, _settings.UsesOidc);
+        _signInItem.Header = _tokens.HasSession ? "Sign out" : "Sign in…";
     }
 
     private void BuildTrayIcon()
@@ -99,6 +231,20 @@ public partial class App : Application
 
         var openItem = new NativeMenuItem("Open web UI");
         openItem.Click += (_, _) => OpenWebUi();
+        _openItem = openItem;
+
+        _signInItem = new NativeMenuItem("Sign in…");
+        _signInItem.Click += (_, _) =>
+        {
+            if (_tokens.HasSession)
+            {
+                SignOut();
+            }
+            else
+            {
+                _ = SignInAsync();
+            }
+        };
 
         var settingsItem = new NativeMenuItem("Settings…");
         settingsItem.Click += (_, _) => ShowSettings();
@@ -129,6 +275,9 @@ public partial class App : Application
                 quitItem,
             },
         };
+
+        _menu = menu;
+        UpdateSignInItem();   // inserts "Sign in…" after "Open web UI" only when sign-in is configured
 
         _trayIcon = new TrayIcon
         {
@@ -307,7 +456,8 @@ public partial class App : Application
         // app -- taking the tray icon and both hotkeys with it, from one menu click.
         try
         {
-            var window = new SettingsWindow(_settings, _client);
+            var window = new SettingsWindow(
+                _settings, _client, _tokens.HasSession, _tokens.IsProtectedAtRest);
             window.Saved += () =>
             {
                 _settings.Save();
@@ -330,7 +480,7 @@ public partial class App : Application
     {
         try
         {
-            Process.Start(new ProcessStartInfo(_settings.InstanceUrl) { UseShellExecute = true });
+            BrowserLauncher.Open(_settings.EffectiveWebUiUrl);
         }
         catch (Exception exc)
         {

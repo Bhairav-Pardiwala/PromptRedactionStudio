@@ -21,6 +21,20 @@
       <TextBox x:Name="KeyBox" PasswordChar="•" Watermark="leave blank for none" />
     </StackPanel>
 
+    <!-- Only visible on an instance that signs in. Read-only: these values are
+         deployed by IT in managed.json, not typed in per machine. -->
+    <Border x:Name="SignInPanel" IsVisible="False"
+            BorderThickness="1" BorderBrush="#40808080" CornerRadius="6" Padding="10">
+      <StackPanel Spacing="4">
+        <TextBlock Text="Sign-in" FontWeight="SemiBold" FontSize="12" />
+        <TextBlock x:Name="SignInStatus" FontSize="11.5" TextWrapping="Wrap" />
+        <TextBlock x:Name="SignInIssuer" FontSize="11" Opacity="0.65" TextWrapping="Wrap" />
+        <TextBlock x:Name="SignInStorage" FontSize="11" Opacity="0.65" TextWrapping="Wrap" />
+        <TextBlock Text="Use the tray menu to sign in or out."
+                   FontSize="11" Opacity="0.65" />
+      </StackPanel>
+    </Border>
+
     <StackPanel Orientation="Horizontal" Spacing="10">
       <Button x:Name="TestButton" Content="Test connection" />
       <TextBlock x:Name="TestResult" VerticalAlignment="Center"
