@@ -18,6 +18,14 @@
     </div>
   </div>
   <div class="topbar-actions">
+    <!-- Only ever shown when the instance reports auth_required. A local install
+         never sees it. -->
+    <span id="auth-lock" class="auth-lock" hidden>
+      <span class="auth-lock-mark" aria-hidden="true">&#128274;</span>
+      <input type="password" id="auth-key" class="auth-key" placeholder="Instance key"
+             autocomplete="off" spellcheck="false" aria-label="Instance key">
+      <button type="button" id="btn-auth-save" class="btn btn-ghost btn-tiny">Unlock</button>
+    </span>
     <span id="engine-status" class="pill pill-muted">Loading&hellip;</span>
     <button type="button" id="btn-sample" class="btn btn-ghost">Load sample prompt</button>
   </div>

@@ -78,6 +78,11 @@ class SessionStore:
             )
         return session
 
+    def delete(self, session_id: str) -> bool:
+        """Drop one mapping. Returns whether there was one to drop."""
+        with self._lock:
+            return self._data.pop(session_id, None) is not None
+
     def clear(self) -> int:
         with self._lock:
             count = len(self._data)

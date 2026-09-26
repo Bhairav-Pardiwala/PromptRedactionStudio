@@ -23,10 +23,42 @@ logger = logging.getLogger("prompt_redaction")
 
 STATIC_DIR = Path(__file__).parent / "static"
 
+# Two independent, optional keys. Neither set -- the default, and the only thing a
+# single-user install ever sees -- means every route is open and nothing below fires.
+API_KEY_ENV = "REDACTION_API_KEY"
+API_KEY_HEADER = "X-Redaction-Key"
+# A separate key for the one destructive, instance-wide operation. Falls back to the
+# ordinary key when unset, so a single-key deployment still has it covered.
+ADMIN_KEY_ENV = "REDACTION_ADMIN_KEY"
+ADMIN_KEY_HEADER = "X-Redaction-Admin-Key"
+DOCS_ENV = "REDACTION_ENABLE_DOCS"
+
+
+def _docs_enabled() -> bool:
+    """Whether the interactive API docs are served.
+
+    An explicit REDACTION_ENABLE_DOCS wins either way. Otherwise the docs follow the
+    key: on for a local instance with no authentication, because the README links to
+    them, and off once a key is set, because /docs has no way to send one and a shared
+    instance should not advertise its whole surface to anonymous callers.
+    """
+    override = os.environ.get(DOCS_ENV, "").strip().lower()
+    if override in {"1", "true", "yes", "on"}:
+        return True
+    if override in {"0", "false", "no", "off"}:
+        return False
+    return not os.environ.get(API_KEY_ENV)
+
+
+_DOCS = _docs_enabled()
+
 app = FastAPI(
     title="Prompt Redaction Studio",
     description="Redact PII from LLM prompts with Microsoft Presidio, then restore it.",
     version="1.0.0",
+    docs_url="/docs" if _DOCS else None,
+    redoc_url="/redoc" if _DOCS else None,
+    openapi_url="/openapi.json" if _DOCS else None,
 )
 
 # Entity groupings, so the options panel can present ~100 entity types usefully rather
@@ -129,26 +161,42 @@ SAMPLE_PROMPT = (
 )
 
 
-API_KEY_ENV = "REDACTION_API_KEY"
-API_KEY_HEADER = "X-Redaction-Key"
+def _check(expected: Optional[str], supplied: Optional[str], header: str) -> None:
+    """Compare one key, but only when one is configured.
 
-
-def require_api_key(x_redaction_key: Optional[str] = Header(default=None)) -> None:
-    """Check the shared key, but only when one is configured.
-
-    Deployments on a trusted network leave REDACTION_API_KEY unset and this is a no-op.
-    Setting it turns on the check everywhere at once, with no client change beyond
-    sending the header.
+    No key configured means this is a no-op, which is what keeps a single-user install
+    on a laptop behaving exactly as it always has.
     """
-    expected = os.environ.get(API_KEY_ENV)
     if not expected:
         return
     # Constant-time compare so the endpoint cannot be used as a timing oracle.
-    if not x_redaction_key or not secrets.compare_digest(x_redaction_key, expected):
+    if not supplied or not secrets.compare_digest(supplied, expected):
         raise HTTPException(
             status_code=401,
-            detail="Missing or invalid " + API_KEY_HEADER + " header.",
+            detail="Missing or invalid " + header + " header.",
         )
+
+
+def require_api_key(x_redaction_key: Optional[str] = Header(default=None)) -> None:
+    """The everyday key: detection, redaction, restore, policy, dropping own session."""
+    _check(os.environ.get(API_KEY_ENV), x_redaction_key, API_KEY_HEADER)
+
+
+def require_admin_key(
+    x_redaction_admin_key: Optional[str] = Header(default=None),
+    x_redaction_key: Optional[str] = Header(default=None),
+) -> None:
+    """The admin key, for operations that affect the whole instance.
+
+    Admin key if one is set, otherwise the ordinary key, otherwise open. That ordering
+    means separating the two is opt-in, while an instance that sets only the ordinary
+    key still does not leave a destructive route unauthenticated.
+    """
+    admin_expected = os.environ.get(ADMIN_KEY_ENV)
+    if admin_expected:
+        _check(admin_expected, x_redaction_admin_key, ADMIN_KEY_HEADER)
+        return
+    _check(os.environ.get(API_KEY_ENV), x_redaction_key, API_KEY_HEADER)
 
 
 def _http_error(exc: Exception, status: int = 400) -> HTTPException:
@@ -157,10 +205,14 @@ def _http_error(exc: Exception, status: int = 400) -> HTTPException:
 
 @app.get("/api/health")
 def health() -> Dict[str, Any]:
+    """Liveness. Deliberately open, so a load balancer can probe it without a key.
+
+    It reports no usage: `active_sessions` used to live here, and a live count of how
+    many redactions an instance is holding is not something an anonymous caller needs.
+    """
     return {
         "status": "ok",
         "loaded_engines": engines.loaded_engines(),
-        "active_sessions": len(redaction.store),
     }
 
 
@@ -230,6 +282,14 @@ def get_config() -> Dict[str, Any]:
         "default_operator": operators.PLACEHOLDER,
         "sample_prompt": SAMPLE_PROMPT,
         "error": error,
+        # Whether a key is needed, never the key itself. The frontend renders its unlock
+        # field from this, which is why this one route stays open: the UI has to be able
+        # to boot before it can discover that it needs a key. Nothing here is sensitive --
+        # the entity and operator inventory is identical in every install.
+        "auth_required": bool(os.environ.get(API_KEY_ENV)),
+        "admin_auth_required": bool(
+            os.environ.get(ADMIN_KEY_ENV) or os.environ.get(API_KEY_ENV)
+        ),
     }
 
 
@@ -302,13 +362,25 @@ def post_restore(request: schemas.RestoreRequest) -> Dict[str, Any]:
         raise _http_error(exc)
 
 
-@app.post("/api/sessions/clear")
+@app.post("/api/sessions/clear", dependencies=[Depends(require_admin_key)])
 def clear_sessions() -> Dict[str, int]:
-    """Drop every stored token mapping. The mappings are the keys to the redaction."""
+    """Drop every stored token mapping, for every client. An operator's tool.
+
+    On a shared instance this discards other people's in-flight restores, which is why
+    it takes the admin key. A client wanting to drop its own redaction wants the route
+    below instead.
+    """
     return {"cleared": redaction.store.clear()}
 
 
-@app.get("/api/policy")
+@app.delete("/api/sessions/{session_id}", dependencies=[Depends(require_api_key)])
+def delete_session(session_id: str) -> Dict[str, int]:
+    """Drop one mapping. Unknown or already-expired ids report zero rather than 404 --
+    the caller wanted the mapping gone, and it is."""
+    return {"cleared": 1 if redaction.store.delete(session_id) else 0}
+
+
+@app.get("/api/policy", dependencies=[Depends(require_api_key)])
 def get_policy() -> Dict[str, Any]:
     """The redaction settings this instance wants clients to use.
 

@@ -14,8 +14,8 @@ Paste a prompt, get a redacted version to copy, send it to any model, then paste
 back to restore the real values. A desktop tray app does the same on the clipboard from any
 application, via a hotkey.
 
-📖 **[Full guide](docs/GUIDE.md)** — every option explained, API reference, org deployment,
-how the restore round trip works.
+📖 **[Full guide](docs/GUIDE.md)** — every option explained, API reference, how the
+restore round trip works. ⚙️ **[Administrator guide](docs/ADMIN.md)** — deploying it to a team.
 
 > All names, cards and IDs in the sample prompt, tests and screenshots are **synthetic**.
 > No real personal data is in this repository.
@@ -163,8 +163,8 @@ curl -X POST http://localhost:8000/api/restore \
 ```
 
 The model never repeated the phone number, so it's reported in `not_found` rather than
-silently dropped. Interactive docs for every route are at <http://localhost:8000/docs>; the
-full route table is in the [guide](docs/GUIDE.md#api).
+silently dropped. Interactive docs for every route are at <http://localhost:8000/docs> (on an
+instance with no API key set); the full route table is in the [guide](docs/GUIDE.md#api).
 
 ---
 
@@ -184,8 +184,9 @@ That produces a single ~97 MB executable with no runtime to install; swap `win-x
 `linux-x64` or `osx-arm64`. Point it at your server's URL in Settings and press **Test
 connection**.
 
-Org deployment, central policy and the API key are covered in the
-[guide](docs/GUIDE.md#desktop-app-deployment).
+Rolling this out to a team? [**docs/ADMIN.md**](docs/ADMIN.md) covers server
+configuration, SSO behind a reverse proxy, central policy and deploying the desktop
+client to a fleet.
 
 ---
 

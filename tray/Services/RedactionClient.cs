@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Net;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -28,8 +30,21 @@ public sealed class RedactionClient : IDisposable
 
     public RedactionClient(HttpClient? http = null)
     {
-        _http = http ?? new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+        // Redirects are off deliberately. An SSO reverse proxy answers an unauthenticated
+        // API call with a 302 to its login page; following that lands us on a 200 of HTML,
+        // which reads as success and fails much later as a JSON parse error. Better to see
+        // the 3xx and say what it means.
+        _http = http ?? new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
+        {
+            Timeout = TimeSpan.FromSeconds(30),
+        };
     }
+
+    /// <summary>
+    /// Supplies a bearer token when the instance sits behind an OAuth proxy. Called with
+    /// true to force a renewal, which is what happens after a 401.
+    /// </summary>
+    public Func<bool, CancellationToken, Task<string?>>? AccessTokenProvider { get; set; }
 
     /// <summary>Base URL of the instance, e.g. https://redaction.corp.example.com</summary>
     public string BaseUrl { get; set; } = "http://127.0.0.1:8000";
@@ -41,9 +56,23 @@ public sealed class RedactionClient : IDisposable
     {
         try
         {
-            using var request = BuildRequest(HttpMethod.Get, "/api/health");
+            using var request = await BuildRequestAsync(
+                HttpMethod.Get, "/api/health", forceRefresh: false, cancellationToken).ConfigureAwait(false);
             using var response = await _http.SendAsync(request, cancellationToken).ConfigureAwait(false);
-            return response.IsSuccessStatusCode;
+            if (!response.IsSuccessStatusCode)
+            {
+                return false;
+            }
+
+            // Checking the status code alone is not enough. A sign-in proxy can answer with
+            // a perfectly good 200 that happens to be an HTML login page, and reporting
+            // "connected" over an instance that cannot serve a single request is worse than
+            // reporting nothing at all.
+            var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            using var document = JsonDocument.Parse(body);
+            return document.RootElement.TryGetProperty("status", out var status)
+                && status.ValueKind == JsonValueKind.String
+                && status.GetString() == "ok";
         }
         catch (Exception)
         {
@@ -54,8 +83,8 @@ public sealed class RedactionClient : IDisposable
 
     public async Task<PolicyResponse> GetPolicyAsync(CancellationToken cancellationToken = default)
     {
-        using var request = BuildRequest(HttpMethod.Get, "/api/policy");
-        using var response = await SendAsync(request, cancellationToken).ConfigureAwait(false);
+        using var response = await SendAsync(
+            HttpMethod.Get, "/api/policy", null, cancellationToken).ConfigureAwait(false);
         var policy = await response.Content
             .ReadFromJsonAsync<PolicyResponse>(JsonOptions, cancellationToken)
             .ConfigureAwait(false);
@@ -88,23 +117,37 @@ public sealed class RedactionClient : IDisposable
             payload["per_entity_operators"] = policy.PerEntityOperators;
         }
 
-        using var request = BuildRequest(HttpMethod.Post, "/api/redact");
-        request.Content = JsonContent.Create(payload, options: JsonOptions);
-
-        using var response = await SendAsync(request, cancellationToken).ConfigureAwait(false);
+        using var response = await SendAsync(
+            HttpMethod.Post,
+            "/api/redact",
+            () => JsonContent.Create(payload, options: JsonOptions),
+            cancellationToken).ConfigureAwait(false);
         var result = await response.Content
             .ReadFromJsonAsync<RedactResponse>(JsonOptions, cancellationToken)
             .ConfigureAwait(false);
         return result ?? throw new RedactionClientException("The instance returned an empty response.");
     }
 
-    private HttpRequestMessage BuildRequest(HttpMethod method, string path)
+    private async Task<HttpRequestMessage> BuildRequestAsync(
+        HttpMethod method, string path, bool forceRefresh, CancellationToken cancellationToken)
     {
         var baseUrl = BaseUrl.TrimEnd('/');
         var request = new HttpRequestMessage(method, baseUrl + path);
+
         if (!string.IsNullOrWhiteSpace(ApiKey))
         {
             request.Headers.Add("X-Redaction-Key", ApiKey);
+        }
+
+        // Both can be present: the proxy may want the bearer while the instance behind it
+        // still wants its own key.
+        if (AccessTokenProvider is not null)
+        {
+            var token = await AccessTokenProvider(forceRefresh, cancellationToken).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(token))
+            {
+                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            }
         }
 
         return request;
@@ -112,13 +155,43 @@ public sealed class RedactionClient : IDisposable
 
     /// <summary>Send, turning every failure mode into one exception type with a readable message.</summary>
     private async Task<HttpResponseMessage> SendAsync(
-        HttpRequestMessage request,
+        HttpMethod method,
+        string path,
+        Func<HttpContent>? content,
         CancellationToken cancellationToken)
     {
-        HttpResponseMessage response;
+        var response = await AttemptAsync(method, path, content, false, cancellationToken)
+            .ConfigureAwait(false);
+
+        // One retry with a freshly minted token: an access token that expired mid-session
+        // should not make the user sign in again.
+        if (response.StatusCode == HttpStatusCode.Unauthorized && AccessTokenProvider is not null)
+        {
+            response.Dispose();
+            response = await AttemptAsync(method, path, content, true, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        return Interpret(response, await ReadDetailAsync(response, cancellationToken).ConfigureAwait(false));
+    }
+
+    private async Task<HttpResponseMessage> AttemptAsync(
+        HttpMethod method,
+        string path,
+        Func<HttpContent>? content,
+        bool forceRefresh,
+        CancellationToken cancellationToken)
+    {
+        using var request = await BuildRequestAsync(method, path, forceRefresh, cancellationToken)
+            .ConfigureAwait(false);
+        if (content is not null)
+        {
+            request.Content = content();
+        }
+
         try
         {
-            response = await _http.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            return await _http.SendAsync(request, cancellationToken).ConfigureAwait(false);
         }
         catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
@@ -130,31 +203,72 @@ public sealed class RedactionClient : IDisposable
                 "Could not reach the instance at " + BaseUrl + ". " + exc.Message);
         }
 
+    }
+
+    /// <summary>FastAPI puts the readable reason in {"detail": "..."}; fall back to the status.</summary>
+    private static async Task<string> ReadDetailAsync(
+        HttpResponseMessage response, CancellationToken cancellationToken)
+    {
         if (response.IsSuccessStatusCode)
         {
-            return response;
+            return string.Empty;
         }
 
-        // FastAPI puts the readable reason in {"detail": "..."}; fall back to the status.
-        string detail;
         try
         {
             var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
             using var document = JsonDocument.Parse(body);
-            detail = document.RootElement.TryGetProperty("detail", out var element)
+            return document.RootElement.TryGetProperty("detail", out var element)
                 ? element.ToString()
                 : response.ReasonPhrase ?? response.StatusCode.ToString();
         }
         catch (Exception)
         {
-            detail = response.ReasonPhrase ?? response.StatusCode.ToString();
+            return response.ReasonPhrase ?? response.StatusCode.ToString();
+        }
+    }
+
+    private HttpResponseMessage Interpret(HttpResponseMessage response, string detail)
+    {
+        if (response.IsSuccessStatusCode)
+        {
+            return response;
         }
 
+        // Read everything off the response before disposing it. StatusCode happens to
+        // survive disposal today -- only the setters check -- but that is an internal
+        // detail of HttpResponseMessage, not a promise.
+        var status = (int)response.StatusCode;
+        var location = response.Headers.Location?.ToString();
+        var mediaType = response.Content.Headers.ContentType?.MediaType;
         response.Dispose();
 
-        if ((int)response.StatusCode == 401)
+        // A sign-in proxy rejects an unauthenticated API call in one of two ways, and
+        // neither looks like an API error: a redirect to the provider, or a page of HTML.
+        // oauth2-proxy in bearer-token mode answers 403 with its own sign-in page, so
+        // matching only on 3xx would leave the user reading "Forbidden".
+        var isRedirect = status is >= 300 and < 400;
+        var isHtml = mediaType is not null
+            && mediaType.Contains("html", StringComparison.OrdinalIgnoreCase);
+
+        if (isRedirect || isHtml)
         {
-            throw new RedactionClientException("The instance rejected the API key: " + detail);
+            throw new RedactionClientException(
+                "The instance at " + BaseUrl + " answered this API call with "
+                + (isRedirect
+                    ? "a redirect" + (location is null ? "" : " to " + location)
+                    : "a web page (HTTP " + status + ")")
+                + " rather than data, which means it sits behind a sign-in proxy that did "
+                + "not accept this client. Configure the proxy to accept bearer tokens, or "
+                + "sign in from the tray menu.");
+        }
+
+        if (status == 401)
+        {
+            throw new RedactionClientException(
+                AccessTokenProvider is null
+                    ? "The instance rejected the API key: " + detail
+                    : "The instance rejected the sign-in: " + detail);
         }
 
         throw new RedactionClientException(detail);

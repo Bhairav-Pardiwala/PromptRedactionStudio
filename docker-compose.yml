@@ -10,10 +10,13 @@ services:
       - "8000:8000"
     restart: unless-stopped
     # environment:
-    #   # Require an X-Redaction-Key header on /api/analyze|redact|restore. Unset means
-    #   # no authentication, which is the default and assumes a trusted network. Note
-    #   # that setting it also 401s the bundled web UI, which sends no such header.
+    #   # Require an X-Redaction-Key header on the detection, redaction, restore and
+    #   # policy routes. Unset means no authentication, which is the default and assumes
+    #   # a trusted network. The bundled web UI prompts for the key and keeps working.
     #   REDACTION_API_KEY: ${REDACTION_API_KEY:?set REDACTION_API_KEY before composing up}
+    #   # A separate key for POST /api/sessions/clear, which discards every client's
+    #   # mapping. Unset means that route falls back to REDACTION_API_KEY.
+    #   REDACTION_ADMIN_KEY: ${REDACTION_ADMIN_KEY:-}
     #   # Org-wide redaction defaults served by /api/policy. Mount the file too.
     #   REDACTION_POLICY_FILE: /policy.yaml
     # volumes:
