@@ -117,6 +117,20 @@ body {
 .panel-title { margin: 0; font-size: 13px; font-weight: 650; text-transform: uppercase;
   letter-spacing: 0.05em; color: var(--ink-soft); }
 
+/* The Options title is a button so that phones can fold the pane away; everywhere else it
+   must look and behave exactly like a plain .panel-title. */
+.options-toggle { display: flex; align-items: center; justify-content: space-between;
+  width: 100%; padding: 0; border: 0; background: none; font: inherit; color: inherit;
+  letter-spacing: inherit; text-transform: inherit; text-align: left; cursor: default; }
+.options-chevron { display: none; font-size: 14px; transition: transform 0.15s ease; }
+
+@media (max-width: 860px) {
+  .options-toggle { min-height: 32px; cursor: pointer; }
+  .options-chevron { display: inline; }
+  .options.is-collapsed .options-body { display: none; }
+  .options.is-collapsed .options-chevron { transform: rotate(-90deg); }
+}
+
 .panel-head {
   display: flex; align-items: center; justify-content: space-between;
   gap: 10px; margin: 18px 0 8px;

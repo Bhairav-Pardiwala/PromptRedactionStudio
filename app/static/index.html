@@ -35,7 +35,14 @@
 
   <!-- ---------------------------------------------------------------- options -->
   <aside class="panel options" aria-label="Redaction options">
-    <h2 class="panel-title">Options</h2>
+    <!-- The toggle only collapses anything on narrow screens; see initOptionsToggle(). -->
+    <h2 class="panel-title">
+      <button type="button" id="btn-options-toggle" class="options-toggle"
+              aria-expanded="true" aria-controls="options-body">Options<span
+              class="options-chevron" aria-hidden="true">&#9662;</span></button>
+    </h2>
+
+    <div id="options-body" class="options-body">
 
     <section class="field">
       <label for="engine">NLP engine</label>
@@ -109,6 +116,7 @@
         <button type="button" class="btn btn-tiny btn-danger" id="btn-clear-sessions">Clear stored mappings</button>
       </div>
     </details>
+    </div>
   </aside>
 
   <!-- ----------------------------------------------------------------- prompt -->
