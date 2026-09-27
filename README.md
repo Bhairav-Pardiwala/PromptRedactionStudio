@@ -11,7 +11,8 @@ you paste leaves the box.
 ![The web UI detecting personal data in a prompt, with the options panel on the left and scored findings on the right](docs/web-ui-detection.png)
 
 Paste a prompt, get a redacted version to copy, send it to any model, then paste the reply
-back to restore the real values. A desktop tray app does the same on the clipboard from any
+back to restore the real values. Whole documents work the same way: DOCX, XLSX, PDF, CSV,
+Markdown and text files. A desktop tray app does the same on the clipboard from any
 application, via a hotkey.
 
 📖 **[Full guide](docs/GUIDE.md)** — every option explained, API reference, how the
@@ -122,6 +123,21 @@ alongside it.
 
 ![The restore panel putting real values back into a model's JSON reply, reporting 18 of 18 tokens restored](docs/web-ui-restore.png)
 
+### A document
+
+1. Switch to the **Document** tab and drop in one or more files. They are redacted straight
+   away, and you can keep adding more to the same batch.
+2. Under **Anything else to redact?** you get every word still in the redacted files, without
+   the articles, prepositions and pronouns. Tick anything the model missed, or type a
+   phrase, and every file is redacted again with it. To stop redacting a value, press
+   **↺** next to it in the token map.
+3. Download each file, or **Download all** as a zip, and give them to a model. Paste its
+   reply into the restore box, or drop the files it edited back in, to get the real values.
+
+One person gets one token across every file in the batch, including headers, tables,
+comments and hyperlink addresses. Author metadata and tracked deletions are removed.
+Details are in the [guide](docs/GUIDE.md#documents).
+
 ### Against the API
 
 ```bash
@@ -213,7 +229,7 @@ It is not a statement that the code is free of bugs — see the note at the bott
 ## Tests
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests\ -v     # 68 backend tests
+.\.venv\Scripts\python.exe -m pytest tests\ -v     # 136 backend tests
 dotnet test tray.Tests                             # 25 desktop client tests
 ```
 

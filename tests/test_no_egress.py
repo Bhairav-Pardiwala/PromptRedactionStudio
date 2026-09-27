@@ -11,12 +11,15 @@ going through a socket, so anything added later -- telemetry, a crash reporter, 
 download at runtime -- trips this regardless of the library it was written with.
 """
 
+import base64
 import socket
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+
+from .office_fixtures import build_docx
 
 ENGINE = "spacy_sm"
 
@@ -100,6 +103,23 @@ def test_full_round_trip_makes_no_outbound_connection(attempts):
         )
         assert restored.status_code == 200, restored.text
         assert restored.json()["restored_text"] == PROMPT
+
+        # Documents too: parsing, redacting and rebuilding a DOCX, then restoring it.
+        docx = base64.b64encode(build_docx()).decode("ascii")
+        doc = client.post(
+            "/api/documents/redact",
+            json={"filename": "a.docx", "content_base64": docx, "engine": ENGINE},
+        )
+        assert doc.status_code == 200, doc.text
+        doc_restored = client.post(
+            "/api/documents/restore",
+            json={
+                "filename": "a.redacted.docx",
+                "content_base64": doc.json()["content_base64"],
+                "session_id": doc.json()["session_id"],
+            },
+        )
+        assert doc_restored.status_code == 200, doc_restored.text
 
     assert attempts == [], "the app tried to reach the network: " + ", ".join(attempts)
 

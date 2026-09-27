@@ -119,12 +119,24 @@ class PlaceholderAllocator:
     (`sorted(pii_entities, reverse=True)` in EngineBase._operate), so tokens are handed
     out in reverse reading order. finalize() renumbers them by first appearance in the
     anonymized text, so the user sees <PERSON_1> before <PERSON_2>.
+
+    `existing` seeds it with a session's mapping (final token -> original), which is how
+    a batch of documents shares one token set: a value seen in an earlier file gets its
+    old token back, final and never renumbered, and a new value is numbered after the
+    highest index already used for its type.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, existing: Optional[Dict[str, str]] = None) -> None:
         self._by_value: Dict[Tuple[str, str], str] = {}
         self._counters: Dict[str, int] = {}
         self._provisional: Dict[str, str] = {}
+        self._existing: Dict[str, str] = dict(existing or {})
+        self._offsets: Dict[str, int] = {}
+        for token, original in self._existing.items():
+            entity_type, _, number = token[1:-1].rpartition("_")
+            self._by_value[(entity_type, original)] = token
+            if number.isdigit():
+                self._offsets[entity_type] = max(self._offsets.get(entity_type, 0), int(number))
 
     def token_for(self, entity_type: str, original: str) -> str:
         key = (entity_type, original)
@@ -155,8 +167,12 @@ class PlaceholderAllocator:
         tokens that actually survived into the output (Presidio may merge or drop
         overlapping spans after a token was already allocated).
         """
+        # Seeded tokens are already final: report the ones this text actually uses.
+        mapping: Dict[str, str] = {
+            token: original for token, original in self._existing.items() if token in text
+        }
         if not self._provisional:
-            return text, {}
+            return text, mapping
 
         # Order provisional tokens by where they first appear in the anonymized text.
         appearances = []
@@ -166,9 +182,8 @@ class PlaceholderAllocator:
                 appearances.append((position, token))
         appearances.sort()
 
-        counters: Dict[str, int] = {}
+        counters: Dict[str, int] = dict(self._offsets)
         final_map: Dict[str, str] = {}
-        mapping: Dict[str, str] = {}
         for _, token in appearances:
             entity_type = token[2 : token.rindex("_")]
             index = counters.get(entity_type, 0) + 1
@@ -259,6 +274,7 @@ def build_operators(
     default_operator: Optional[Dict[str, Any]],
     per_entity: Optional[Dict[str, Dict[str, Any]]],
     detected_entity_types: Optional[List[str]] = None,
+    existing_mapping: Optional[Dict[str, str]] = None,
 ) -> Tuple[Dict[str, OperatorConfig], PlaceholderAllocator, Dict[str, str]]:
     """Build the operators dict AnonymizerEngine.anonymize() expects.
 
@@ -270,7 +286,7 @@ def build_operators(
     Returns the config map, the allocator holding the placeholder mapping, and a record
     of which operator name applies per entity type (used to label the findings table).
     """
-    allocator = PlaceholderAllocator()
+    allocator = PlaceholderAllocator(existing_mapping)
     chosen: Dict[str, str] = {}
     operators: Dict[str, OperatorConfig] = {}
 

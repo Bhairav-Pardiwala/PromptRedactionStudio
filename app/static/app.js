@@ -18,7 +18,9 @@
     perEntity: {},          // entity type -> {type, params}
     entities: null,         // Set of enabled entity types, or null for "all"
     recognizers: [],
-    sessionId: null,
+    sessionId: null,        // the text tab's session; the document tab keeps its own
+    textMapping: {},
+    mode: "text",           // "text" | "doc" -- which tab is showing
     apiKey: null,           // only ever set when the instance reports auth_required
     findings: [],
     sort: { key: "score", dir: -1 },
@@ -175,6 +177,8 @@
   }
 
   function analyze() {
+    // The document tab's findings come from its last redaction, not from the prompt.
+    if (state.mode === "doc") { return; }
     var text = $("prompt").value;
     if (!text.trim()) {
       state.findings = [];
@@ -325,6 +329,7 @@
 
     api("/api/redact", basePayload()).then(function (data) {
       state.sessionId = data.session_id;
+      state.textMapping = data.mapping;
       state.findings = data.findings;
       $("redacted").value = data.redacted_text;
       $("btn-copy").disabled = !data.redacted_text;
@@ -376,21 +381,64 @@
       tdValue.className = "value mono";
       tdValue.textContent = mapping[token];
 
+      var tdAction = document.createElement("td");
+      var unredact = document.createElement("button");
+      unredact.type = "button";
+      unredact.className = "btn btn-ghost btn-tiny";
+      unredact.textContent = "↺";
+      unredact.title = "Keep this value — stop redacting it";
+      unredact.setAttribute("aria-label", "Stop redacting " + token);
+      unredact.addEventListener("click", function () { unredactToken(mapping[token]); });
+      tdAction.appendChild(unredact);
+
       tr.appendChild(tdToken);
       tr.appendChild(tdValue);
+      tr.appendChild(tdAction);
       tbody.appendChild(tr);
     });
+    $("mapping-unredact-hint").hidden = tokens.length === 0;
+  }
+
+  /* Stop redacting one value: allow-list it, drop it from any deny-list mark, and redact
+     again. The allow-list is Presidio's own filter over every recognizer, so no model,
+     mark or document-wide propagation brings it back; deleting it from the Allow-list
+     box does. Tokens for every other value keep their numbers. */
+  function unredactToken(original) {
+    var box = $("allow-list");
+    var lines = box.value.split("\n").map(function (line) { return line.trim(); }).filter(Boolean);
+    if (lines.indexOf(original) === -1) {
+      lines.push(original);
+      box.value = lines.join("\n");
+    }
+
+    var lower = original.toLowerCase();
+    var unmarked = false;
+    state.recognizers.forEach(function (recognizer) {
+      if (recognizer.kind !== "deny_list" || !recognizer.deny_list) { return; }
+      var kept = recognizer.deny_list.filter(function (term) { return term.toLowerCase() !== lower; });
+      if (kept.length !== recognizer.deny_list.length) {
+        recognizer.deny_list = kept;
+        unmarked = true;
+      }
+    });
+    if (unmarked) { renderRecognizers(); }
+
+    toast("“" + original + "” will no longer be redacted");
+    if (state.mode === "doc") { redactAll(); }
+    else if ($("prompt").value.trim()) { redact(); }
   }
 
   /* --- restore -------------------------------------------------------------- */
 
   function restore() {
-    var text = $("reply").value.trim() || $("redacted").value;
+    var docMode = state.mode === "doc";
+    var sessionId = currentSessionId();
+    var text = $("reply").value.trim() || (docMode ? "" : $("redacted").value);
     if (!text) { toast("Paste the model's reply first.", true); return; }
-    if (!state.sessionId) { toast("Redact a prompt first.", true); return; }
+    if (!sessionId) { toast(docMode ? "Redact a document first." : "Redact a prompt first.", true); return; }
 
     $("btn-restore").disabled = true;
-    api("/api/restore", { text: text, session_id: state.sessionId }).then(function (data) {
+    api("/api/restore", { text: text, session_id: sessionId }).then(function (data) {
       $("restored").value = data.restored_text;
       var summary = data.tokens_restored + " of " + data.tokens_total + " tokens restored";
       if (data.not_found.length) {
@@ -1091,7 +1139,9 @@
 
   /* One auto-managed deny-list recognizer per label, so marking three names as PERSON
      produces one card holding three terms rather than three cards. */
-  function markTerm(term, label) {
+  /* Add terms to the deny-list recognizer for `label`, creating it if needed. Shared by
+     the right-click menu and the document tab's suggestions. Returns how many were new. */
+  function addDenyTerms(terms, label) {
     var entity = slugifyEntity(label);
     var existing = null;
     state.recognizers.forEach(function (recognizer) {
@@ -1105,18 +1155,26 @@
       state.recognizers.push(existing);
     }
 
-    var lower = term.toLowerCase();
-    var already = (existing.deny_list || []).some(function (marked) {
-      return marked.toLowerCase() === lower;    // the matching is case-insensitive too
+    var added = 0;
+    terms.forEach(function (term) {
+      var lower = term.toLowerCase();
+      var already = (existing.deny_list || []).some(function (marked) {
+        return marked.toLowerCase() === lower;    // the matching is case-insensitive too
+      });
+      if (!already) { existing.deny_list.push(term); added++; }
     });
-    if (already) { toast("Already marked as " + entity); return; }
+    if (added) { renderRecognizers(); }
+    return added;
+  }
 
-    existing.deny_list.push(term);
+  function markTerm(term, label) {
+    var entity = slugifyEntity(label);
+    if (!addDenyTerms([term], label)) { toast("Already marked as " + entity); return; }
+
     if (!recognizersRevealed) {
       recognizersRevealed = true;
       reveal($("recognizer-list"));   // show the user where the term landed, once
     }
-    renderRecognizers();
     analyze();
     toast("Marked “" + term + "” as " + entity);
   }
@@ -1275,6 +1333,766 @@
     });
   }
 
+  /* --- documents ------------------------------------------------------------ */
+  /* Files are read into memory, sent as base64 with the same options a prompt gets, and
+     the redacted copies come back as downloads. Every file in a batch joins one server
+     session, so one person keeps one token across all of them, and a reply about any of
+     the files restores against the whole batch. Files are sent one at a time, in order,
+     which keeps the session's token numbering deterministic. Nothing about the files is
+     kept in browser storage; sessionStorage holds only which tab was open. */
+
+  var TAB_STORAGE = "prs.tab";
+  var docState = {
+    files: [],            // {id, file, base64, status, result, error}
+    sessionId: null,      // the batch's session, set by the first file redacted
+    busy: false,
+    nextId: 1,
+    merged: { findings: [], mapping: {} }
+  };
+
+  function currentSessionId() {
+    return state.mode === "doc" ? docState.sessionId : state.sessionId;
+  }
+
+  function formatBytes(bytes) {
+    if (bytes < 1024) { return bytes + " B"; }
+    if (bytes < 1024 * 1024) { return Math.round(bytes / 1024) + " KB"; }
+    return (bytes / (1024 * 1024)).toFixed(1).replace(/\.0$/, "") + " MB";
+  }
+
+  function extensionOf(name) {
+    var dot = name.lastIndexOf(".");
+    return dot === -1 ? "" : name.slice(dot).toLowerCase();
+  }
+
+  function plural(count, word) {
+    return count + " " + word + (count === 1 ? "" : "s");
+  }
+
+  function setMode(mode) {
+    state.mode = mode;
+    var isDoc = mode === "doc";
+    $("tab-text").setAttribute("aria-selected", String(!isDoc));
+    $("tab-doc").setAttribute("aria-selected", String(isDoc));
+    $("pane-text").hidden = isDoc;
+    $("pane-doc").hidden = !isDoc;
+    $("doc-restore").hidden = !isDoc;
+    $("btn-restore").disabled = !currentSessionId();
+    $("reply").value = "";
+    $("restored").value = "";
+    $("restore-summary").textContent = "";
+    try { window.sessionStorage.setItem(TAB_STORAGE, mode); } catch (err) { /* not remembered */ }
+
+    if (isDoc) {
+      state.findings = docState.merged.findings;
+      renderFindings(state.findings);
+      renderMapping(docState.merged.mapping);
+    } else {
+      renderMapping(state.textMapping);
+      analyze();
+    }
+  }
+
+  function readAsBase64(file) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function () {
+        var url = String(reader.result);
+        resolve(url.slice(url.indexOf(",") + 1));   // strip "data:<type>;base64,"
+      };
+      reader.onerror = function () { reject(new Error("Could not read " + file.name + ".")); };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  /* Refuse what the server would refuse, before reading a single byte. */
+  function checkFile(file) {
+    var types = state.config.document_types || [];
+    if (types.indexOf(extensionOf(file.name)) === -1) {
+      return file.name + ": unsupported file type. Supported: " + types.join(" ");
+    }
+    if (file.size > state.config.max_document_bytes) {
+      return file.name + " is too large. The limit is " + formatBytes(state.config.max_document_bytes) + ".";
+    }
+    return null;
+  }
+
+  /* --- the batch -------------------------------------------------------------- */
+
+  function addDocuments(fileList) {
+    var incoming = Array.prototype.slice.call(fileList || []);
+    if (!incoming.length) { return; }
+
+    var accepted = [];
+    incoming.forEach(function (file) {
+      var problem = checkFile(file);
+      var duplicate = docState.files.some(function (entry) {
+        return entry.file.name === file.name && entry.file.size === file.size;
+      });
+      if (problem) { toast(problem, true); }
+      else if (duplicate) { toast(file.name + " is already in this batch.", true); }
+      else { accepted.push(file); }
+    });
+    $("doc-file").value = "";
+    if (!accepted.length) { return; }
+
+    Promise.all(accepted.map(function (file) {
+      return readAsBase64(file).then(function (base64) {
+        return { id: docState.nextId++, file: file, base64: base64, status: "waiting",
+                 result: null, error: null };
+      });
+    })).then(function (entries) {
+      docState.files = docState.files.concat(entries);
+      renderBatch();
+      pump();
+    }).catch(function (err) { toast(err.message, true); });
+  }
+
+  /* Redact waiting files one at a time, each joining the batch's session. Files added
+     while this runs are picked up by the same loop. */
+  function pump() {
+    if (docState.busy) { return; }
+    var next = docState.files.filter(function (entry) { return entry.status === "waiting"; })[0];
+    if (!next) { finishBatch(); return; }
+
+    docState.busy = true;
+    next.status = "redacting";
+    renderBatch();
+
+    var payload = basePayload();
+    delete payload.text;                 // the prompt has nothing to do with this request
+    payload.filename = next.file.name;
+    payload.content_base64 = next.base64;
+    payload.session_id = docState.sessionId;
+
+    api("/api/documents/redact", payload).then(function (data) {
+      docState.sessionId = data.session_id;
+      next.result = data;
+      next.status = "done";
+      next.error = null;
+    }).catch(function (err) {
+      if (docState.sessionId && /expired/.test(err.message)) {
+        // The batch's mapping is gone, so the tokens already handed out mean nothing any
+        // more. Start a fresh session and redact every file again, in order.
+        docState.sessionId = null;
+        docState.files.forEach(function (entry) { entry.status = "waiting"; entry.result = null; });
+        toast("The batch had expired. Redacting every file again.", true);
+        return;
+      }
+      next.status = "error";
+      next.error = err.message;
+      toast(next.file.name + ": " + err.message, true);
+    }).finally(function () {
+      docState.busy = false;
+      renderBatch();
+      pump();
+    });
+  }
+
+  /* Re-run every file, e.g. after options change or suggestions are marked. The session
+     is kept, so every token already handed out stays exactly as it was. */
+  function redactAll() {
+    if (!docState.files.length) { toast("Add a file first.", true); return; }
+    docState.files.forEach(function (entry) { entry.status = "waiting"; });
+    renderBatch();
+    pump();
+  }
+
+  function finishBatch() {
+    var done = docState.files.filter(function (entry) { return entry.result; });
+    var findings = [];
+    var mapping = {};
+    var items = 0;
+    done.forEach(function (entry) {
+      findings = findings.concat(entry.result.findings);
+      Object.keys(entry.result.mapping).forEach(function (token) {
+        mapping[token] = entry.result.mapping[token];
+      });
+      items += entry.result.items.length;
+    });
+    docState.merged = { findings: findings, mapping: mapping };
+
+    if (state.mode === "doc") {
+      state.findings = findings;
+      renderFindings(findings);
+      renderMapping(mapping);
+    }
+    $("btn-restore").disabled = !currentSessionId();
+
+    var errors = docState.files.length - done.length;
+    status($("doc-status"),
+      !docState.files.length ? "No files"
+        : errors ? plural(errors, "error")
+        : items ? items + " redacted" : "No PII found",
+      !docState.files.length ? "muted" : errors ? "err" : items ? "ok" : "muted");
+
+    renderBatchSummary(done, items, mapping);
+    renderSuggestions(mergeSuggestions(done));
+    $("doc-result").hidden = !done.length;
+  }
+
+  function renderBatchSummary(done, items, mapping) {
+    var warnings = [];
+    done.forEach(function (entry) {
+      entry.result.warnings.forEach(function (text) { warnings.push(entry.file.name + ": " + text); });
+    });
+    var tokens = Object.keys(mapping).length;
+    $("doc-summary").textContent = done.length
+      ? "✓ " + plural(done.length, "file") + " · " + plural(items, "item") + " redacted · "
+        + plural(tokens, "token") + (warnings.length ? " · " + plural(warnings.length, "warning") : "")
+      : "";
+    $("btn-doc-download-all").disabled = !done.length;
+
+    var box = $("doc-warnings");
+    box.innerHTML = "";
+    warnings.forEach(function (text) {
+      var p = document.createElement("p");
+      p.className = "hint warn";
+      p.textContent = "⚠ " + text;
+      box.appendChild(p);
+    });
+  }
+
+  var STATUS_LABELS = { waiting: "Waiting", redacting: "Redacting…", error: "Error" };
+
+  function renderBatch() {
+    var list = $("doc-files");
+    list.innerHTML = "";
+    docState.files.forEach(function (entry) {
+      // DOM nodes and textContent only: file names come from the user's disk.
+      var row = document.createElement("li");
+      row.className = "file-row";
+
+      var icon = document.createElement("span");
+      icon.className = "file-row-icon";
+      icon.setAttribute("aria-hidden", "true");
+      icon.textContent = "📄";
+
+      var name = document.createElement("span");
+      name.className = "file-row-name";
+      name.textContent = entry.file.name;
+      name.title = entry.error || entry.file.name;
+
+      var size = document.createElement("span");
+      size.className = "file-row-size";
+      size.textContent = formatBytes(entry.file.size);
+
+      var pill = document.createElement("span");
+      var count = entry.result ? entry.result.items.length : 0;
+      if (entry.status === "done") {
+        status(pill, count ? count + " redacted" : "No PII", count ? "ok" : "muted");
+      } else {
+        status(pill, STATUS_LABELS[entry.status],
+          entry.status === "error" ? "err" : entry.status === "redacting" ? "busy" : "muted");
+      }
+
+      var download = document.createElement("button");
+      download.type = "button";
+      download.className = "btn btn-tiny";
+      download.textContent = "⬇ Download";
+      download.disabled = !entry.result;
+      download.addEventListener("click", function () {
+        var data = entry.result;
+        downloadBlob(new Blob([base64ToBytes(data.content_base64)], { type: data.media_type }), data.filename);
+      });
+
+      var remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "btn btn-ghost btn-tiny";
+      remove.setAttribute("aria-label", "Remove " + entry.file.name + " from the batch");
+      remove.textContent = "×";
+      remove.disabled = entry.status === "redacting";
+      remove.addEventListener("click", function () { removeDocument(entry.id); });
+
+      [icon, name, size, pill, download, remove].forEach(function (node) { row.appendChild(node); });
+      list.appendChild(row);
+    });
+
+    var hasFiles = docState.files.length > 0;
+    $("doc-batch").hidden = !hasFiles;
+    $("doc-drop").classList.toggle("dropzone-small", hasFiles);
+    $("doc-drop-main").innerHTML = hasFiles
+      ? "Add more files: drop them here or <u>browse</u>"
+      : "Drop files or <u>browse</u>";
+    if (docState.busy) { status($("doc-status"), "Redacting…", "busy"); }
+  }
+
+  function removeDocument(id) {
+    // Only the file leaves the batch; its tokens stay in the session, so a reply that
+    // mentions them still restores, and their numbers are never handed out again.
+    docState.files = docState.files.filter(function (entry) { return entry.id !== id; });
+    renderBatch();
+    finishBatch();
+  }
+
+  var newBatchArmed = null;
+  function newBatch() {
+    // Two clicks rather than confirm(): a browser dialog would block the page.
+    var button = $("btn-doc-new");
+    if (!newBatchArmed) {
+      button.textContent = "Click again to clear";
+      newBatchArmed = setTimeout(function () {
+        newBatchArmed = null;
+        button.textContent = "New batch";
+      }, 3000);
+      return;
+    }
+    clearTimeout(newBatchArmed);
+    newBatchArmed = null;
+    button.textContent = "New batch";
+
+    var old = docState.sessionId;
+    docState.files = [];
+    docState.sessionId = null;
+    renderBatch();
+    finishBatch();
+    $("btn-restore").disabled = true;
+    if (old) {
+      api("/api/sessions/" + encodeURIComponent(old), null, "DELETE").catch(function () {
+        /* it expires on its own within the hour */
+      });
+    }
+    toast("New batch started");
+  }
+
+  /* --- suggestions: words the model left, for the user to redact ------------- */
+  /* The server lists what is still in each redacted file, minus articles, auxiliaries,
+     prepositions, conjunctions and pronouns; the lists are merged across the batch.
+     Ticking words (or typing a phrase) marks them exactly as the right-click menu does --
+     a deny-list recognizer per label -- and redacts every file again. */
+
+  var SUGGESTION_LIMIT = 300;
+
+  var PREVIEW_CONTEXTS = 3;
+
+  function mergeSuggestions(done) {
+    var byKey = {};
+    done.forEach(function (entry) {
+      entry.result.suggestions.forEach(function (suggestion) {
+        var key = suggestion.term.toLowerCase();
+        var merged = byKey[key];
+        if (merged) { merged.count += suggestion.count; }
+        else {
+          merged = byKey[key] = { term: suggestion.term, count: suggestion.count, key: key, contexts: [] };
+        }
+        // Keep the file each snippet came from; the preview names it in a batch.
+        (suggestion.contexts || []).forEach(function (context) {
+          if (merged.contexts.length < PREVIEW_CONTEXTS) {
+            merged.contexts.push({ before: context.before, match: context.match,
+                                   after: context.after, file: entry.file.name });
+          }
+        });
+      });
+    });
+    // Same order as app/suggestions.py: likely names and IDs, then frequency, then A-Z.
+    var merged = Object.keys(byKey).map(function (key) { return byKey[key]; });
+    merged.sort(function (a, b) {
+      var likelyA = /^[A-Z]|\d/.test(a.term) ? 0 : 1;
+      var likelyB = /^[A-Z]|\d/.test(b.term) ? 0 : 1;
+      return likelyA - likelyB || b.count - a.count || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
+    });
+    return { suggestions: merged.slice(0, SUGGESTION_LIMIT), suggestions_total: merged.length };
+  }
+
+  function renderSuggestions(data) {
+    hidePreview();
+    var box = $("doc-suggestions");
+    box.innerHTML = "";
+    var shown = data.suggestions.length;
+    var total = data.suggestions_total;
+    $("suggest-counter").textContent = total
+      ? "(" + (shown < total ? shown + " of " + total : total) + " words)"
+      : "";
+    $("suggest-filter").value = "";
+
+    if (!shown) {
+      var empty = document.createElement("div");
+      empty.className = "empty";
+      empty.textContent = "No words left to review.";
+      box.appendChild(empty);
+    }
+    data.suggestions.forEach(function (suggestion) {
+      // DOM nodes and textContent only: these are words from the user's files.
+      var chip = document.createElement("label");
+      chip.className = "chip";
+      chip.dataset.term = suggestion.term.toLowerCase();
+      var tick = document.createElement("input");
+      tick.type = "checkbox";
+      tick.value = suggestion.term;
+      tick.addEventListener("change", function () {
+        chip.classList.toggle("is-checked", tick.checked);
+        updateSuggestButton();
+      });
+      chip.addEventListener("mouseenter", function () { showPreview(chip, suggestion); });
+      chip.addEventListener("mouseleave", hidePreview);
+      tick.addEventListener("focus", function () { showPreview(chip, suggestion); });
+      tick.addEventListener("blur", hidePreview);
+      var word = document.createElement("span");
+      word.textContent = suggestion.term;
+      chip.appendChild(tick);
+      chip.appendChild(word);
+      if (suggestion.count > 1) {
+        var count = document.createElement("span");
+        count.className = "chip-count";
+        count.textContent = "×" + suggestion.count;
+        chip.appendChild(count);
+      }
+      box.appendChild(chip);
+    });
+
+    var select = $("suggest-entity");
+    var previous = select.value;
+    select.innerHTML = "";
+    var entities = markableEntities();
+    entities.forEach(function (entity) {
+      var option = document.createElement("option");
+      option.value = entity;
+      option.textContent = "as " + entity;
+      select.appendChild(option);
+    });
+    select.value = entities.indexOf(previous) !== -1 ? previous
+      : entities.indexOf("PERSON") !== -1 ? "PERSON" : entities[0];
+    updateSuggestButton();
+  }
+
+  /* The hover preview: where a suggested word sits, as "…before WORD after…". The text is
+     from the redacted files, so anything already redacted reads as its token. Built from
+     text nodes only -- it is the user's file content. */
+  function showPreview(chip, suggestion) {
+    var contexts = suggestion.contexts || [];
+    if (!contexts.length) { return; }
+    var box = $("suggest-preview");
+    box.innerHTML = "";
+    var showFile = docState.files.length > 1;
+
+    contexts.forEach(function (context) {
+      var line = document.createElement("div");
+      line.className = "preview-line";
+      if (showFile && context.file) {
+        var file = document.createElement("span");
+        file.className = "preview-file";
+        file.textContent = context.file;
+        line.appendChild(file);
+      }
+      var text = document.createElement("span");
+      text.className = "preview-text";
+      text.appendChild(document.createTextNode(context.before));
+      var word = document.createElement("mark");
+      word.textContent = context.match;
+      text.appendChild(word);
+      text.appendChild(document.createTextNode(context.after));
+      line.appendChild(text);
+      box.appendChild(line);
+    });
+    if (suggestion.count > contexts.length) {
+      var more = document.createElement("div");
+      more.className = "preview-more";
+      more.textContent = "+ " + (suggestion.count - contexts.length) + " more";
+      box.appendChild(more);
+    }
+
+    box.hidden = false;
+    chip.setAttribute("aria-describedby", "suggest-preview");
+    // Below the chip, or above it when there is no room; kept inside the viewport.
+    var rect = chip.getBoundingClientRect();
+    var width = box.offsetWidth;
+    var height = box.offsetHeight;
+    var left = Math.min(Math.max(8, rect.left), window.innerWidth - width - 8);
+    var top = rect.bottom + 6;
+    if (top + height > window.innerHeight - 8) { top = Math.max(8, rect.top - height - 6); }
+    box.style.left = left + "px";
+    box.style.top = top + "px";
+  }
+
+  function hidePreview() {
+    $("suggest-preview").hidden = true;
+    document.querySelectorAll('[aria-describedby="suggest-preview"]').forEach(function (el) {
+      el.removeAttribute("aria-describedby");
+    });
+  }
+
+  function selectedSuggestions() {
+    var terms = Array.prototype.map.call(
+      $("doc-suggestions").querySelectorAll("input:checked"),
+      function (input) { return input.value; });
+    var custom = $("suggest-custom").value.trim();
+    if (custom) { terms.push(custom); }
+    return terms;
+  }
+
+  function updateSuggestButton() {
+    var count = selectedSuggestions().length;
+    var button = $("btn-suggest-redact");
+    button.disabled = count === 0;
+    button.textContent = count > 1 ? "Redact " + count + " selected" : "Redact selected";
+  }
+
+  function filterSuggestions() {
+    var needle = $("suggest-filter").value.trim().toLowerCase();
+    $("doc-suggestions").querySelectorAll(".chip").forEach(function (chip) {
+      chip.hidden = needle !== "" && chip.dataset.term.indexOf(needle) === -1;
+    });
+  }
+
+  function redactSuggestions() {
+    var terms = selectedSuggestions();
+    if (!terms.length) { return; }
+    var label = $("suggest-entity").value;
+    var added = addDenyTerms(terms, label);
+    $("suggest-custom").value = "";
+    if (!added) { toast("Already marked as " + slugifyEntity(label)); return; }
+    toast("Added " + plural(added, "term") + " as " + slugifyEntity(label) + " — redacting every file again");
+    redactAll();
+  }
+
+  /* --- downloads -------------------------------------------------------------- */
+
+  function base64ToBytes(base64) {
+    var binary = atob(base64);
+    var bytes = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i++) { bytes[i] = binary.charCodeAt(i); }
+    return bytes;
+  }
+
+  function downloadBlob(blob, filename) {
+    var url = URL.createObjectURL(blob);
+    var link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    // Revoked once the browser has started the download, so the file does not linger.
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+
+  /* A minimal zip writer: entries stored uncompressed, which every unzip tool reads.
+     Office files are zips already, so compressing again would gain almost nothing, and
+     this keeps the page free of a zip library and the server free of the files. */
+  var CRC_TABLE = null;
+
+  function crc32(bytes) {
+    if (!CRC_TABLE) {
+      CRC_TABLE = new Uint32Array(256);
+      for (var n = 0; n < 256; n++) {
+        var c = n;
+        for (var k = 0; k < 8; k++) { c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; }
+        CRC_TABLE[n] = c >>> 0;
+      }
+    }
+    var crc = 0xFFFFFFFF;
+    for (var i = 0; i < bytes.length; i++) { crc = CRC_TABLE[(crc ^ bytes[i]) & 0xFF] ^ (crc >>> 8); }
+    return (crc ^ 0xFFFFFFFF) >>> 0;
+  }
+
+  function uniqueNames(names) {
+    var seen = {};
+    return names.map(function (name) {
+      var key = name.toLowerCase();
+      if (!seen[key]) { seen[key] = 1; return name; }
+      seen[key] += 1;
+      var dot = name.lastIndexOf(".");
+      var stem = dot > 0 ? name.slice(0, dot) : name;
+      var ext = dot > 0 ? name.slice(dot) : "";
+      return stem + " (" + seen[key] + ")" + ext;
+    });
+  }
+
+  function zipStore(entries) {
+    var encoder = new TextEncoder();
+    var now = new Date();
+    var time = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
+    var date = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+    var files = [];
+    var central = [];
+    var offset = 0;
+    var centralSize = 0;
+
+    entries.forEach(function (entry) {
+      var name = encoder.encode(entry.name);
+      var crc = crc32(entry.bytes);
+      var size = entry.bytes.length;
+
+      var local = new DataView(new ArrayBuffer(30));
+      local.setUint32(0, 0x04034b50, true);
+      local.setUint16(4, 20, true);          // version needed
+      local.setUint16(6, 0x0800, true);      // names are UTF-8
+      local.setUint16(8, 0, true);           // stored
+      local.setUint16(10, time, true);
+      local.setUint16(12, date, true);
+      local.setUint32(14, crc, true);
+      local.setUint32(18, size, true);
+      local.setUint32(22, size, true);
+      local.setUint16(26, name.length, true);
+      local.setUint16(28, 0, true);
+      files.push(local.buffer, name, entry.bytes);
+
+      var header = new DataView(new ArrayBuffer(46));
+      header.setUint32(0, 0x02014b50, true);
+      header.setUint16(4, 20, true);
+      header.setUint16(6, 20, true);
+      header.setUint16(8, 0x0800, true);
+      header.setUint16(10, 0, true);
+      header.setUint16(12, time, true);
+      header.setUint16(14, date, true);
+      header.setUint32(16, crc, true);
+      header.setUint32(20, size, true);
+      header.setUint32(24, size, true);
+      header.setUint16(28, name.length, true);
+      header.setUint32(42, offset, true);    // everything else in the header stays zero
+      central.push(header.buffer, name);
+
+      offset += 30 + name.length + size;
+      centralSize += 46 + name.length;
+    });
+
+    var end = new DataView(new ArrayBuffer(22));
+    end.setUint32(0, 0x06054b50, true);
+    end.setUint16(8, entries.length, true);
+    end.setUint16(10, entries.length, true);
+    end.setUint32(12, centralSize, true);
+    end.setUint32(16, offset, true);
+
+    return new Blob(files.concat(central, [end.buffer]), { type: "application/zip" });
+  }
+
+  function downloadAll() {
+    var done = docState.files.filter(function (entry) { return entry.result; });
+    if (!done.length) { return; }
+    if (done.length === 1) {
+      var only = done[0].result;
+      downloadBlob(new Blob([base64ToBytes(only.content_base64)], { type: only.media_type }), only.filename);
+      return;
+    }
+    var names = uniqueNames(done.map(function (entry) { return entry.result.filename; }));
+    downloadBlob(zipStore(done.map(function (entry, i) {
+      return { name: names[i], bytes: base64ToBytes(entry.result.content_base64) };
+    })), "redacted-documents.zip");
+  }
+
+  /* --- restore files ---------------------------------------------------------- */
+
+  function restoreDocuments(fileList) {
+    var files = Array.prototype.slice.call(fileList || []);
+    if (!files.length) { return; }
+    if (!docState.sessionId) { toast("Redact a document first.", true); return; }
+    for (var i = 0; i < files.length; i++) {
+      var problem = checkFile(files[i]);
+      if (problem) { toast(problem, true); $("doc-restore-file").value = ""; return; }
+    }
+
+    var restored = [];
+    var tokens = 0;
+    var chain = Promise.resolve();
+    files.forEach(function (file) {
+      chain = chain.then(function () {
+        return readAsBase64(file);
+      }).then(function (base64) {
+        return api("/api/documents/restore", {
+          filename: file.name,
+          content_base64: base64,
+          session_id: docState.sessionId
+        });
+      }).then(function (data) {
+        restored.push(data);
+        tokens += data.tokens_restored;
+      });
+    });
+
+    chain.then(function () {
+      if (restored.length === 1) {
+        var only = restored[0];
+        downloadBlob(new Blob([base64ToBytes(only.content_base64)], { type: only.media_type }), only.filename);
+      } else {
+        var names = uniqueNames(restored.map(function (data) { return data.filename; }));
+        downloadBlob(zipStore(restored.map(function (data, i) {
+          return { name: names[i], bytes: base64ToBytes(data.content_base64) };
+        })), "restored-documents.zip");
+      }
+      $("restore-summary").textContent = plural(restored.length, "file") + " restored · "
+        + plural(tokens, "token") + " put back";
+      toast(restored.length === 1 ? "Restored copy downloaded" : "Restored copies downloaded as a zip");
+    }).catch(function (err) {
+      toast(err.message, true);
+    }).finally(function () {
+      $("doc-restore-file").value = "";
+    });
+  }
+
+  /* A drop zone is a <label> around a hidden file input, so a click browses. This adds
+     keyboard access and drag-and-drop. */
+  function bindDropZone(zone, input, onFiles) {
+    zone.tabIndex = 0;
+    zone.setAttribute("role", "button");
+    zone.addEventListener("keydown", function (event) {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); input.click(); }
+    });
+    input.addEventListener("change", function () { onFiles(input.files); });
+    zone.addEventListener("dragover", function (event) {
+      event.preventDefault();
+      zone.classList.add("is-dragover");
+    });
+    zone.addEventListener("dragleave", function () { zone.classList.remove("is-dragover"); });
+    zone.addEventListener("drop", function (event) {
+      event.preventDefault();
+      zone.classList.remove("is-dragover");
+      onFiles(event.dataTransfer.files);
+    });
+  }
+
+  function initDocuments(config) {
+    $("tab-text").addEventListener("click", function () { setMode("text"); });
+    $("tab-doc").addEventListener("click", function () { setMode("doc"); });
+
+    // The page is static and always current, but the server may be an older process
+    // (started before document support, without --reload). Say so, rather than showing
+    // "up to NaN MB" and refusing every file as unsupported.
+    if (!config.document_types || !config.max_document_bytes) {
+      $("doc-drop").hidden = true;
+      $("doc-status").textContent = "Unavailable";
+      var note = document.createElement("p");
+      note.className = "hint warn";
+      note.textContent = "This server does not support documents yet. It is probably still "
+        + "running an older version: restart it and reload this page.";
+      $("doc-drop").parentNode.insertBefore(note, $("doc-drop"));
+      return;
+    }
+
+    var types = config.document_types;
+    $("doc-types").textContent = types.join(" ") + " · up to " + formatBytes(config.max_document_bytes) + " each";
+    $("doc-file").accept = types.join(",");
+    $("doc-restore-file").accept = types.concat([".txt"]).join(",");
+
+    bindDropZone($("doc-drop"), $("doc-file"), addDocuments);
+    bindDropZone($("doc-restore-drop"), $("doc-restore-file"), restoreDocuments);
+
+    // A file dropped just beside a drop zone would otherwise replace the whole page. Only
+    // files: dragging text into the prompt must keep working.
+    ["dragover", "drop"].forEach(function (name) {
+      window.addEventListener(name, function (event) {
+        var types = event.dataTransfer && event.dataTransfer.types;
+        if (types && Array.prototype.indexOf.call(types, "Files") !== -1) { event.preventDefault(); }
+      });
+    });
+
+    $("suggest-filter").addEventListener("input", filterSuggestions);
+    // The preview is fixed to the viewport; scrolling would leave it behind its chip.
+    $("doc-suggestions").addEventListener("scroll", hidePreview);
+    window.addEventListener("scroll", hidePreview, true);
+    $("suggest-custom").addEventListener("input", updateSuggestButton);
+    $("suggest-custom").addEventListener("keydown", function (event) {
+      if (event.key === "Enter") { event.preventDefault(); redactSuggestions(); }
+    });
+    $("btn-suggest-redact").addEventListener("click", redactSuggestions);
+    $("btn-doc-again").addEventListener("click", redactAll);
+    $("btn-doc-download-all").addEventListener("click", downloadAll);
+    $("btn-doc-new").addEventListener("click", newBatch);
+
+    var saved = null;
+    try { saved = window.sessionStorage.getItem(TAB_STORAGE); } catch (err) { /* default tab */ }
+    if (saved === "doc") { setMode("doc"); }
+  }
+
   /* --- wiring --------------------------------------------------------------- */
 
   function onPromptChanged() {
@@ -1338,24 +2156,34 @@
     $("btn-clear-sessions").addEventListener("click", function () {
       // Drops this page's own mapping, not the whole instance's. Clearing every
       // client's mappings is an operator action and needs the admin key.
+      // Both tabs' sessions: the text prompt's and the document batch's. The batch goes
+      // too -- a file added after its mapping is gone would restart at <PERSON_1> and
+      // no longer match the files already redacted.
       function forgetLocally() {
         state.sessionId = null;
+        state.textMapping = {};
+        docState.sessionId = null;
+        docState.files = [];
+        renderBatch();
+        finishBatch();
         $("btn-restore").disabled = true;
         renderMapping({});
       }
 
-      if (!state.sessionId) {
+      var ids = [state.sessionId, docState.sessionId].filter(Boolean);
+      if (!ids.length) {
         forgetLocally();
         toast("Nothing stored to clear");
         return;
       }
 
-      api("/api/sessions/" + encodeURIComponent(state.sessionId), null, "DELETE")
-        .then(function (data) {
-          forgetLocally();
-          toast("Cleared " + data.cleared + " stored mapping(s)");
-        })
-        .catch(function (err) { toast(err.message, true); });
+      Promise.all(ids.map(function (id) {
+        return api("/api/sessions/" + encodeURIComponent(id), null, "DELETE");
+      })).then(function (responses) {
+        var cleared = responses.reduce(function (sum, data) { return sum + data.cleared; }, 0);
+        forgetLocally();
+        toast("Cleared " + cleared + " stored mapping(s)");
+      }).catch(function (err) { toast(err.message, true); });
     });
 
     $("btn-auth-save").addEventListener("click", saveKeyFromInput);
@@ -1405,6 +2233,7 @@
     renderRecognizers();
     bindEvents();
     initDictation();
+    initDocuments(config);
     $("threshold-value").value = state.threshold.toFixed(2);
   }).catch(function (err) {
     status($("engine-status"), "Failed to load", "err");

@@ -199,7 +199,7 @@ Every variable is optional. With none set, the server is open — the single-use
 
 | Variable | Effect |
 |---|---|
-| `REDACTION_API_KEY` | Requires header `X-Redaction-Key` on `/api/analyze`, `/api/redact`, `/api/restore`, `/api/policy`, `DELETE /api/sessions/{id}`. |
+| `REDACTION_API_KEY` | Requires header `X-Redaction-Key` on `/api/analyze`, `/api/redact`, `/api/restore`, `/api/documents/redact`, `/api/documents/restore`, `/api/policy`, `DELETE /api/sessions/{id}`. |
 | `REDACTION_ADMIN_KEY` | Requires header `X-Redaction-Admin-Key` on `POST /api/sessions/clear`, which discards every client's mapping. Unset: falls back to `REDACTION_API_KEY`. |
 | `REDACTION_ENABLE_DOCS` | `1` / `0` forces the `/docs` API pages on or off. Unset: on without an API key, off with one. |
 | `REDACTION_POLICY_FILE` | YAML of org-wide redaction defaults — see [Central policy](#central-policy). |

@@ -54,6 +54,25 @@ class RestoreRequest(BaseModel):
     session_id: str
 
 
+class DocumentRedactRequest(RedactRequest):
+    """A whole file, base64-encoded, with every option a text redaction takes.
+
+    `text` is inherited and ignored. Base64 in JSON rather than a multipart upload keeps
+    the option models shared with /api/redact and needs no extra dependency.
+    """
+
+    filename: str
+    content_base64: str
+    # Join an earlier document's session, so the whole batch shares one token set.
+    session_id: Optional[str] = None
+
+
+class DocumentRestoreRequest(BaseModel):
+    filename: str
+    content_base64: str
+    session_id: str
+
+
 class Finding(BaseModel):
     entity_type: str
     start: int
@@ -62,6 +81,9 @@ class Finding(BaseModel):
     text: str
     recognizer: Optional[str] = None
     explanation: Optional[Dict[str, Any]] = None
+    # Documents only: where the finding sits ("Paragraph 3", "Sheet1!B4"). start and end
+    # are then offsets into that segment, not into the whole file.
+    location: Optional[str] = None
 
 
 class AnalyzeResponse(BaseModel):
@@ -88,3 +110,47 @@ class RestoreResponse(BaseModel):
     tokens_restored: int
     tokens_total: int
     not_found: List[str]
+
+
+class SuggestionContext(BaseModel):
+    before: str
+    match: str
+    after: str
+
+
+class Suggestion(BaseModel):
+    term: str
+    count: int
+    # A few places the word appears, from the redacted text, for a hover preview.
+    contexts: List[SuggestionContext] = Field(default_factory=list)
+
+
+class DocumentRedactResponse(BaseModel):
+    """No original text is echoed back: the caller already has the file it uploaded."""
+
+    session_id: Optional[str] = None
+    filename: str
+    media_type: str
+    content_base64: str
+    findings: List[Finding]
+    items: List[Dict[str, Any]]
+    mapping: Dict[str, str]
+    operators_applied: Dict[str, str]
+    reversible: bool
+    engine: str
+    segments_changed: int
+    # Words still in the redacted file, minus grammatical words, for the user to review.
+    suggestions: List[Suggestion]
+    suggestions_total: int
+    warnings: List[str]
+
+
+class DocumentRestoreResponse(BaseModel):
+    filename: str
+    media_type: str
+    content_base64: str
+    restored_counts: Dict[str, int]
+    tokens_restored: int
+    tokens_total: int
+    not_found: List[str]
+    warnings: List[str]

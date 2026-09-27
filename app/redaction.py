@@ -7,6 +7,7 @@ id, and expires after a TTL. Nothing is written to disk.
 
 from __future__ import annotations
 
+import contextlib
 import re
 import secrets
 import threading
@@ -14,6 +15,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from presidio_analyzer import BatchAnalyzerEngine, RecognizerResult
 from presidio_anonymizer import AnonymizerEngine, DeanonymizeEngine
 from presidio_anonymizer.entities import OperatorConfig, OperatorResult
 
@@ -22,6 +24,14 @@ from . import engines, operators, recognizers
 SESSION_TTL_SECONDS = 60 * 60  # one hour
 MAX_SESSIONS = 200
 MAX_TEXT_CHARS = 100_000
+# A document is redacted as one joined text so tokens stay consistent across it, which
+# makes it longer than any prompt. Still bounded, because detection time grows with it.
+MAX_DOCUMENT_CHARS = 500_000
+
+# Joins a document's segments into one text for a single analyze pass. The unit
+# separator cannot come from a real document (it is stripped from every segment first),
+# so splitting on it afterwards gives back exactly the segments that went in.
+SEGMENT_SEP = "\n\x1f\n"
 
 _anonymizer = AnonymizerEngine()
 _deanonymizer = DeanonymizeEngine()
@@ -40,6 +50,15 @@ class RedactionSession:
     placeholder_map: Dict[str, str] = field(default_factory=dict)
     encrypted_spans: List[Dict[str, str]] = field(default_factory=list)
     encrypt_keys: Dict[str, str] = field(default_factory=dict)
+    # Expiry runs from last use, so a batch of documents that keeps growing does not
+    # lose its mapping an hour after the first file.
+    touched_at: float = 0.0
+    # Held from token allocation until the new tokens are merged in, so two files added
+    # to one batch at the same moment cannot both be handed <PERSON_4>.
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        self.touched_at = self.touched_at or self.created_at
 
 
 class SessionStore:
@@ -53,11 +72,11 @@ class SessionStore:
 
     def _purge(self) -> None:
         cutoff = time.time() - self._ttl
-        for key in [k for k, v in self._data.items() if v.created_at < cutoff]:
+        for key in [k for k, v in self._data.items() if v.touched_at < cutoff]:
             del self._data[key]
         # Bound memory even if nothing has expired yet.
         while len(self._data) > self._max:
-            oldest = min(self._data.items(), key=lambda kv: kv[1].created_at)[0]
+            oldest = min(self._data.items(), key=lambda kv: kv[1].touched_at)[0]
             del self._data[oldest]
 
     def create(self) -> RedactionSession:
@@ -71,6 +90,8 @@ class SessionStore:
         with self._lock:
             self._purge()
             session = self._data.get(session_id)
+            if session is not None:
+                session.touched_at = time.time()
         if session is None:
             raise RedactionError(
                 "That redaction session has expired or was never created. "
@@ -96,15 +117,15 @@ class SessionStore:
 store = SessionStore()
 
 
-def _validate_text(text: str) -> str:
+def _validate_text(text: str, max_chars: int = MAX_TEXT_CHARS) -> str:
     if text is None:
         raise RedactionError("No text supplied.")
-    if len(text) > MAX_TEXT_CHARS:
+    if len(text) > max_chars:
         raise RedactionError(
             "Text is too long ("
             + str(len(text))
             + " characters). The limit is "
-            + str(MAX_TEXT_CHARS)
+            + str(max_chars)
             + "."
         )
     return text
@@ -138,9 +159,37 @@ def analyze(
     custom_recognizers: Optional[List[Dict[str, Any]]] = None,
     detect_organization: bool = False,
     return_explanations: bool = False,
+    max_chars: int = MAX_TEXT_CHARS,
 ) -> Tuple[List[Dict[str, Any]], List[Any]]:
     """Run Presidio detection and return both JSON-ready findings and the raw results."""
-    text = _validate_text(text)
+    text = _validate_text(text, max_chars)
+    return _analyze_texts(
+        [text],
+        engine=engine,
+        language=language,
+        entities=entities,
+        score_threshold=score_threshold,
+        allow_list=allow_list,
+        allow_list_match=allow_list_match,
+        custom_recognizers=custom_recognizers,
+        detect_organization=detect_organization,
+        return_explanations=return_explanations,
+    )[0]
+
+
+def _analyze_texts(
+    texts: List[str],
+    engine: str = engines.DEFAULT_ENGINE,
+    language: str = "en",
+    entities: Optional[List[str]] = None,
+    score_threshold: Optional[float] = None,
+    allow_list: Optional[List[str]] = None,
+    allow_list_match: str = "exact",
+    custom_recognizers: Optional[List[Dict[str, Any]]] = None,
+    detect_organization: bool = False,
+    return_explanations: bool = False,
+) -> List[Tuple[List[Dict[str, Any]], List[Any]]]:
+    """Detect in each text independently. Several texts go through spaCy as one batch."""
     analyzer = engines.get_analyzer(engine, detect_organization)
     ad_hoc = recognizers.build_ad_hoc_recognizers(custom_recognizers or [], language)
 
@@ -152,10 +201,9 @@ def analyze(
             if entity_type not in requested:
                 requested.append(entity_type)
         if not requested:
-            return [], []
+            return [([], []) for _ in texts]
 
-    results = analyzer.analyze(
-        text=text,
+    options = dict(
         language=language,
         entities=requested,
         score_threshold=score_threshold,
@@ -164,8 +212,22 @@ def analyze(
         ad_hoc_recognizers=ad_hoc or None,
         return_decision_process=return_explanations,
     )
+    if len(texts) == 1:
+        batches = [analyzer.analyze(text=texts[0], **options)]
+    else:
+        language_option = options.pop("language")
+        batches = BatchAnalyzerEngine(analyzer_engine=analyzer).analyze_iterator(
+            texts, language_option, batch_size=32, **options
+        )
 
-    findings = [
+    return [
+        (_to_findings(text, results, return_explanations), results)
+        for text, results in zip(texts, batches)
+    ]
+
+
+def _to_findings(text: str, results: List[Any], return_explanations: bool) -> List[Dict[str, Any]]:
+    return [
         {
             "entity_type": result.entity_type,
             "start": result.start,
@@ -179,7 +241,6 @@ def analyze(
         }
         for result in sorted(results, key=lambda r: (r.start, -r.score))
     ]
-    return findings, results
 
 
 def redact(
@@ -198,6 +259,50 @@ def redact(
     server remembering.
     """
     findings, results = analyze(text, **analyze_kwargs)
+    return _anonymize(
+        text, findings, results, default_operator, per_entity_operators, store_session
+    )
+
+
+def _anonymize(
+    text: str,
+    findings: List[Dict[str, Any]],
+    results: List[Any],
+    default_operator: Optional[Dict[str, Any]],
+    per_entity_operators: Optional[Dict[str, Dict[str, Any]]],
+    store_session: bool,
+    session: Optional[RedactionSession] = None,
+) -> Dict[str, Any]:
+    """Everything after detection: allocate tokens, rewrite, and optionally store.
+
+    With `session`, the redaction joins it: tokens it already holds are reused, new ones
+    continue its numbering, and the results are merged into it -- all under the session's
+    lock, so concurrent additions to one batch cannot hand out the same token twice.
+    """
+    with session.lock if session is not None else contextlib.nullcontext():
+        return _anonymize_into(
+            text, findings, results, default_operator, per_entity_operators, store_session,
+            session,
+        )
+
+
+def _anonymize_into(
+    text: str,
+    findings: List[Dict[str, Any]],
+    results: List[Any],
+    default_operator: Optional[Dict[str, Any]],
+    per_entity_operators: Optional[Dict[str, Dict[str, Any]]],
+    store_session: bool,
+    session: Optional[RedactionSession],
+) -> Dict[str, Any]:
+    encrypt_keys = operators.encrypt_keys_in_use(default_operator, per_entity_operators)
+    if session is not None:
+        for entity_type, key in encrypt_keys.items():
+            if session.encrypt_keys.get(entity_type, key) != key:
+                raise RedactionError(
+                    "Use the same AES key for every file in a batch: this one differs "
+                    "from the key its earlier files were encrypted with."
+                )
 
     detected_types = []
     for finding in findings:
@@ -205,11 +310,15 @@ def redact(
             detected_types.append(finding["entity_type"])
 
     operator_map, allocator, chosen = operators.build_operators(
-        default_operator, per_entity_operators, detected_types
+        default_operator,
+        per_entity_operators,
+        detected_types,
+        existing_mapping=session.placeholder_map if session is not None else None,
     )
 
     if not results:
-        session = store.create() if store_session else None
+        if session is None and store_session:
+            session = store.create()
         return {
             "session_id": session.session_id if session else None,
             "original_text": text,
@@ -248,10 +357,11 @@ def redact(
         if item.operator == "encrypt":
             encrypted_spans.append({"entity_type": item.entity_type, "text": item_text})
 
-    encrypt_keys = operators.encrypt_keys_in_use(default_operator, per_entity_operators)
-
-    session = None
-    if store_session:
+    if session is not None:
+        session.placeholder_map.update(mapping)
+        session.encrypted_spans.extend(encrypted_spans)
+        session.encrypt_keys.update(encrypt_keys)
+    elif store_session:
         session = store.create()
         session.placeholder_map = mapping
         session.encrypted_spans = encrypted_spans
@@ -271,7 +381,160 @@ def redact(
     }
 
 
-def restore(text: str, session_id: str) -> Dict[str, Any]:
+def redact_segments(
+    segments: List[str],
+    default_operator: Optional[Dict[str, Any]] = None,
+    per_entity_operators: Optional[Dict[str, Dict[str, Any]]] = None,
+    store_session: bool = True,
+    session_id: Optional[str] = None,
+    **analyze_kwargs: Any,
+) -> Dict[str, Any]:
+    """Redact a document's text segments in one pass, so tokens are consistent across it.
+
+    With `session_id`, the document joins that session's batch: a person already
+    tokenised in an earlier file keeps their token here, and new values continue its
+    numbering. The response's `mapping` lists only the tokens this document uses.
+
+    Redacting each paragraph or cell on its own would restart <PERSON_1> in every one of
+    them. So detection runs per segment -- a model must not read one cell's name into the
+    next cell's text, and it will across any separator -- while token allocation and
+    rewriting run once, over all segments joined, so one person gets one token throughout.
+
+    Findings come back with offsets into their own segment and a `segment` index.
+    """
+    clean = [segment.replace("\x1f", "") for segment in segments]
+    joined = _validate_text(SEGMENT_SEP.join(clean), MAX_DOCUMENT_CHARS)
+    # Looked up before any detection work, so an expired batch fails fast.
+    session = store.get(session_id) if session_id else None
+
+    # Blank segments (empty lines, spacer cells) cannot hold PII; skip the model for them.
+    to_scan = [i for i, segment in enumerate(clean) if segment.strip()]
+    per_segment = _analyze_texts([clean[i] for i in to_scan], **analyze_kwargs) if to_scan else []
+    _propagate_detections(
+        clean, to_scan, per_segment,
+        known=dict(session.placeholder_map) if session is not None else None,
+        allow_list=analyze_kwargs.get("allow_list"),
+    )
+
+    findings: List[Dict[str, Any]] = []
+    results: List[Any] = []
+    offsets = []
+    cursor = 0
+    for segment in clean:
+        offsets.append(cursor)
+        cursor += len(segment) + len(SEGMENT_SEP)
+    for index, (segment_findings, segment_results) in zip(to_scan, per_segment):
+        for finding in segment_findings:
+            findings.append(dict(finding, segment=index))
+        for result in segment_results:
+            # Move each span into the joined text, where anonymization happens.
+            result.start += offsets[index]
+            result.end += offsets[index]
+            results.append(result)
+
+    result = _anonymize(
+        joined, findings, results, default_operator, per_entity_operators, store_session,
+        session,
+    )
+    if session is not None:
+        result["session_id"] = session.session_id
+    redacted_segments = result.pop("redacted_text").split(SEGMENT_SEP)
+    if len(redacted_segments) != len(clean):  # pragma: no cover - spans never cross a separator
+        raise RedactionError("The document could not be split back into its parts.")
+
+    del result["original_text"]
+    # Offsets into the joined text mean nothing to a caller holding separate segments.
+    for item in result["items"]:
+        item.pop("start", None)
+        item.pop("end", None)
+    result["segments"] = redacted_segments
+    return result
+
+
+# Dates are not carried across a document: finding "May" or "today" once must not
+# redact every other "May" and "today" in the file.
+_NOT_PROPAGATED = {"DATE_TIME"}
+PROPAGATED_RECOGNIZER = "Same value found elsewhere in the document"
+
+
+def _propagate_detections(
+    segments: List[str],
+    scanned: List[int],
+    per_segment: List[Tuple[List[Dict[str, Any]], List[Any]]],
+    known: Optional[Dict[str, str]] = None,
+    allow_list: Optional[List[str]] = None,
+) -> None:
+    """Redact every other copy of a value the model found anywhere in the document.
+
+    `known` is a batch session's mapping (token -> original): a value tokenised in an
+    earlier file is redacted in this one too, even where the model misses it here. Values
+    on the allow-list are never spread -- that is how un-redacting a token sticks, since
+    the session still remembers it.
+
+    Detection is per segment, and a model that finds "Marcus Testwell" in a ticket's
+    message can miss the same name alone in the customer_name column. Leaving that copy
+    would leak the exact person the rest of the file hides. So each detected value is
+    looked for, whole-word and case-sensitive, in every segment, and any copy not already
+    covered is added with the same entity type. A copy that only partly overlaps an
+    existing detection -- "Priya" found inside "Priya Placeholder" -- is still added, and
+    the anonymizer keeps the wider span.
+
+    Mutates `per_segment` in place: new findings and results are appended.
+    """
+    seen: Dict[Tuple[str, str], float] = {}
+    for segment_findings, _ in per_segment:
+        for finding in segment_findings:
+            value = finding["text"]
+            if finding["entity_type"] in _NOT_PROPAGATED or len(value.strip()) < 3:
+                continue
+            key = (value, finding["entity_type"])
+            seen[key] = max(seen.get(key, 0.0), finding["score"])
+    for token, value in (known or {}).items():
+        entity_type = token[1:-1].rpartition("_")[0]
+        if entity_type in _NOT_PROPAGATED or len(value.strip()) < 3:
+            continue
+        seen.setdefault((value, entity_type), 1.0)
+    for value in allow_list or []:
+        for key in [k for k in seen if k[0] == value]:
+            del seen[key]
+    if not seen:
+        return
+
+    # Longest first, so "Jane Doe" claims its span before "Jane" is considered.
+    for (value, entity_type), score in sorted(seen.items(), key=lambda kv: -len(kv[0][0])):
+        pattern = re.compile(r"(?<!\w)" + re.escape(value) + r"(?!\w)")
+        for index, (segment_findings, segment_results) in zip(scanned, per_segment):
+            for match in pattern.finditer(segments[index]):
+                start, end = match.span()
+                covered = any(r.start <= start and end <= r.end for r in segment_results)
+                if covered:
+                    continue
+                segment_results.append(RecognizerResult(entity_type, start, end, score))
+                segment_findings.append(
+                    {
+                        "entity_type": entity_type,
+                        "start": start,
+                        "end": end,
+                        "score": score,
+                        "text": value,
+                        "recognizer": PROPAGATED_RECOGNIZER,
+                        "explanation": None,
+                    }
+                )
+
+
+def restore_segments(segments: List[str], session_id: str) -> Dict[str, Any]:
+    """Restore every segment of a document against one session, counting once."""
+    clean = [segment.replace("\x1f", "") for segment in segments]
+    result = restore(SEGMENT_SEP.join(clean), session_id, max_chars=MAX_DOCUMENT_CHARS)
+    restored = result.pop("restored_text").split(SEGMENT_SEP)
+    if len(restored) != len(clean):  # pragma: no cover - originals never contain \x1f
+        raise RedactionError("The document could not be split back into its parts.")
+    result["segments"] = restored
+    return result
+
+
+def restore(text: str, session_id: str, max_chars: int = MAX_TEXT_CHARS) -> Dict[str, Any]:
     """Put the real values back into text that contains redaction tokens.
 
     Presidio's DeanonymizeEngine needs OperatorResult offsets that match the text being
@@ -280,7 +543,7 @@ def restore(text: str, session_id: str) -> Dict[str, Any]:
     So each token is located in the incoming text first and the spans are rebuilt at
     those offsets before handing off to Presidio.
     """
-    text = _validate_text(text)
+    text = _validate_text(text, max_chars)
     session = store.get(session_id)
 
     restored_counts: Dict[str, int] = {}

@@ -134,6 +134,94 @@ your prompt anywhere — Presidio runs locally, and no LLM is called.
 
 ---
 
+## Documents
+
+The **Document** tab redacts whole files with the same options as a prompt. Drop in one or
+more files; each is redacted as soon as it arrives. Review the words left over, then
+download each file or **Download all** as a zip. Give the files to a model. Paste its reply
+into the restore box to get the real values back. If the model edited files and handed them
+back, drop those into the restore area instead: one file downloads as is, several come back
+as a zip.
+
+### Batches
+
+Every file you add joins one **batch**, and the whole batch shares one set of tokens.
+- **Tokens:** Jane Doe is `<PERSON_1>` in the complaint letter, the ticket export and the
+  spreadsheet alike. A file added an hour later reuses those tokens, and new people
+  continue the numbering.
+- **Values spread across files:** a value found in any file is redacted in every file, even
+  where the model misses it.
+- **Restore:** one restore, of a reply or of files, covers the whole batch.
+- **Re-running:** **Redact all again** re-runs every file after you change the options. The
+  tokens already given out stay the same.
+- **Removing a file:** × takes a file out of the batch. Its tokens stay reserved, so a reply
+  that quotes them still restores.
+- **Starting over:** **New batch** (click twice) forgets the batch and its mapping, and the
+  next file starts again at `<PERSON_1>`.
+
+The batch is one server session, which expires an hour after it was last used. Behind the
+scenes, each file is a `POST /api/documents/redact` that passes the previous response's
+`session_id`.
+
+### Un-redacting a value
+
+Each row of the token map has a **↺** button that stops redacting that value. The value is
+added to the **Allow-list**, removed from any mark you made, and every file (or the prompt,
+on the Text tab) is redacted again. Other tokens keep their numbers. The allow-list is
+exact-match, so only that spelling is let through. Delete it from the Allow-list to redact
+it again.
+
+| Type | What is redacted | You get back |
+|---|---|---|
+| `.docx` | body, tables, text boxes, headers, footers, footnotes, comments, hyperlink addresses, field codes, title and subject | a `.docx` |
+| `.xlsx` | text cells, rich text, long numbers typed as numbers (card and phone numbers), cached formula results, comments | a `.xlsx` |
+| `.pdf` | the text of every page | a `.txt` — layout is not kept |
+| `.txt` `.md` `.csv` | every line | the same type, same encoding |
+
+The whole file is redacted as one piece, so `<PERSON_1>` is the same person in a header, a
+table cell and a comment. Detection runs on each paragraph, cell or line separately, so a
+name at the end of one cell is never merged with the start of the next.
+
+A value found anywhere in the file is redacted everywhere it appears. The model can
+recognise "Marcus Testwell" in a sentence and still miss the same name standing alone in
+a `customer_name` column, so every whole-word copy of a detected value is redacted with the
+same token. Those findings show "Same value found elsewhere in the document" as their
+recognizer. Dates are the exception: finding "May" once does not redact every "May" in the
+file. A name the model never recognises anywhere is still missed, and that is what the
+next list is for.
+
+**Anything else to redact?** lists every distinct word still in the redacted file, with the
+most likely ones first: capitalised words and words with digits, then the most frequent.
+Articles, auxiliary verbs, prepositions, conjunctions and pronouns are left out, since they
+can never be personal data. Hover over a word (or tab to it) to see where it appears: up to
+three snippets such as "…TKT-1002,**Elena** Sample,<EMAIL_ADDRESS_2>…", labelled with the file
+when a batch has several. The snippets come from the redacted text, so anything already
+redacted reads as its token. Tick any word the model missed, or type a word or phrase into
+the box below the list, such as "Elena Sample". Pick what to redact it as, and press
+**Redact selected**. The document is redacted again with those terms added, and they drop
+off the list.
+
+These marks work like the right-click marks on a prompt. They become a deny-list recognizer
+under **Custom recognizers**, so they match whole words in any case, and they apply to
+prompts in the Text tab as well.
+
+The file is also cleaned in ways you would not see in Word or Excel:
+- The author, last editor, company and manager fields are blanked.
+- Comment and revision authors are blanked.
+- Tracked deletions are removed, because the deleted text is still inside the file.
+
+Anything that was not checked is listed as a warning, not skipped silently: images, charts,
+embedded objects, pivot-table caches, and linked-workbook caches.
+
+A paragraph that changes keeps its style and its first run's formatting. Mixed formatting
+inside it, such as a bold word, is merged into that first run. Untouched paragraphs, and
+every part of the file that did not change, are copied through byte for byte.
+
+The limit is 10 MB per file. The file is held in memory only and is never written to disk,
+on either the server or the browser.
+
+---
+
 ## Desktop app deployment
 
 The web UI is fine for exploring options, but copy-pasting into a browser tab before every
@@ -315,6 +403,8 @@ Interactive docs at `http://localhost:8000/docs` on instances with no API key se
 | `POST /api/analyze` | detections only — type, offsets, score, explanation |
 | `POST /api/redact` | analyze + anonymize — redacted text, token map, session id |
 | `POST /api/restore` | put real values back into text containing tokens |
+| `POST /api/documents/redact` | redact a whole file — DOCX, XLSX, PDF, TXT, MD, CSV — and get the copy back |
+| `POST /api/documents/restore` | put real values back into a redacted (or LLM-edited) file |
 | `DELETE /api/sessions/{id}` | drop one mapping — what a client clearing its own redaction wants |
 | `POST /api/sessions/clear` | drop **every** stored mapping, for every client (admin key) |
 | `GET /api/health` | liveness, which engines are warm |
@@ -330,6 +420,20 @@ Findings come back with `entity_type`, `start`, `end`, `score`, `text`, the `rec
 that fired, and an `explanation` when you asked for one. Restore responses carry
 `restored_text`, `tokens_restored` / `tokens_total`, a per-token `restored_counts`, and
 `not_found` for tokens the model never repeated.
+
+The document routes take the file as `content_base64` next to `filename`, whose extension
+picks the format. `POST /api/documents/redact` accepts every option `/api/redact` does,
+and returns the redacted file as `content_base64`, a `filename` for it, `findings` with a
+`location` each, the token `mapping`, `warnings`, and `suggestions`. Each suggestion is a
+`{term, count}` for a word left in the redacted file, capped at 300, with the full count in
+`suggestions_total`. Its `session_id` works with `/api/restore` as well, for a reply about the
+document.
+
+To add a file to a batch, pass an earlier response's `session_id` in the request. Values
+that session has already tokenised keep their tokens, new ones continue its numbering, and
+`mapping` lists just the tokens this file uses. An expired or unknown `session_id` returns a
+400. So does an `encrypt` operator whose AES key differs from the one the batch's earlier
+files used. See [Documents](#documents).
 
 A worked round trip with real request and response bodies is in the
 [README](../README.md#sample-run).
@@ -351,6 +455,8 @@ app/
   operators.py    UI operator specs -> Presidio OperatorConfig; placeholder allocator
   recognizers.py  ad-hoc regex / deny-list recognizers
   redaction.py    analyze -> anonymize -> restore, plus the TTL session store
+  documents.py    DOCX / XLSX / PDF / text in and out, as labelled text segments
+  suggestions.py  words left after redaction, minus grammatical words, to review
   policy.py       central IT-defined redaction policy, from REDACTION_POLICY_FILE
   schemas.py      pydantic request/response models
   static/         index.html, styles.css, app.js  (no build step)
@@ -359,6 +465,7 @@ tray/             Avalonia desktop client
   Services/       RedactionClient, MappingStore, HotkeyService, ClipboardService
   Views/          SettingsWindow, ToastWindow
 tests/test_api.py 38 tests over the API
+tests/test_documents.py  document redaction, over the API, on synthetic files
 tray.Tests/       25 tests over the client logic
 ```
 
@@ -372,7 +479,7 @@ entity types.
 ## Tests
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests\ -v     # 68 backend tests
+.\.venv\Scripts\python.exe -m pytest tests\ -v     # 136 backend tests
 dotnet test tray.Tests                             # 25 desktop client tests
 ```
 

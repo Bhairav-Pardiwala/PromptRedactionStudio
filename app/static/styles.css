@@ -352,6 +352,122 @@ tbody tr:hover { background: var(--line-soft); }
   border: 1px dashed var(--line); border-radius: 8px; text-align: center;
 }
 
+/* --- text / document tabs ---------------------------------------------------- */
+
+.tabs {
+  display: flex; gap: 2px; margin: -4px 0 14px;
+  border-bottom: 1px solid var(--line);
+}
+.tab {
+  font: inherit; font-size: 13px; font-weight: 600;
+  padding: 7px 14px; margin-bottom: -1px;
+  color: var(--ink-soft); background: none;
+  border: 0; border-bottom: 2px solid transparent;
+  cursor: pointer;
+}
+.tab:hover { color: var(--ink); }
+.tab[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* --- document mode ----------------------------------------------------------- */
+
+.dropzone {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 4px; min-height: 170px; padding: 20px;
+  border: 2px dashed var(--line); border-radius: var(--radius);
+  background: var(--bg); color: var(--ink-soft);
+  text-align: center; cursor: pointer;
+  transition: border-color .12s, background .12s;
+}
+/* display:flex would otherwise beat [hidden], as with .auth-lock above. */
+.dropzone[hidden] { display: none; }
+.dropzone:hover, .dropzone:focus-visible { border-color: var(--accent); color: var(--ink); }
+.dropzone.is-dragover { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.dropzone-icon { font-size: 30px; line-height: 1; }
+.dropzone-main { font-size: 14px; font-weight: 600; }
+.dropzone-main u { color: var(--accent); text-decoration: none; }
+.dropzone-sub { font-family: var(--mono); font-size: 11.5px; color: var(--ink-faint); }
+.dropzone-small { min-height: 0; padding: 10px; flex-direction: row; border-width: 1px; }
+.dropzone-small .dropzone-main { font-size: 12.5px; font-weight: 550; }
+
+.file-list {
+  list-style: none; margin: 8px 0 0; padding: 0;
+  border: 1px solid var(--line); border-radius: 8px;
+  max-height: 300px; overflow-y: auto;
+}
+.file-row {
+  display: grid; align-items: center; gap: 10px;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto auto;
+  padding: 7px 10px; border-bottom: 1px solid var(--line-soft);
+}
+.file-row:last-child { border-bottom: 0; }
+.file-row-icon { font-size: 16px; line-height: 1; }
+.file-row-name { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-row-size { color: var(--ink-faint); font-size: 12px; white-space: nowrap; }
+@media (max-width: 600px) {
+  .file-row { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .file-row-size { display: none; }
+}
+
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap;
+}
+
+.doc-summary {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+  margin-top: 14px; padding: 10px 12px;
+  border-radius: 8px; background: var(--accent-soft); font-weight: 600;
+}
+
+.suggest-filter { width: 170px; padding: 4px 8px; font-size: 12px; }
+
+.suggestions {
+  display: flex; flex-wrap: wrap; gap: 6px; align-content: flex-start;
+  max-height: 260px; overflow-y: auto; padding: 8px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--bg);
+}
+.suggestions .empty { flex: 1 1 100%; border: 0; }
+
+.chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 9px 3px 6px; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--panel); font-size: 12.5px; cursor: pointer; user-select: none;
+}
+.chip[hidden] { display: none; }
+.chip:hover { border-color: var(--accent); }
+.chip input { margin: 0; accent-color: var(--accent); }
+.chip.is-checked { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.chip-count { font-size: 10.5px; color: var(--ink-faint); }
+
+/* Hover preview for a suggested word. Fixed, so the scrolling chip list cannot clip it;
+   above the footer (30) and toast (50), level with the context menu. */
+.suggest-preview {
+  position: fixed; z-index: 60;
+  max-width: min(520px, calc(100vw - 16px));
+  padding: 8px 10px;
+  background: var(--panel); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.22);
+  pointer-events: none;
+}
+.suggest-preview[hidden] { display: none; }
+.preview-line { padding: 3px 0; }
+.preview-line + .preview-line { border-top: 1px solid var(--line-soft); }
+.preview-file { display: block; font-size: 10.5px; color: var(--ink-faint); }
+.preview-text { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.preview-text mark {
+  background: var(--accent-soft); color: var(--accent);
+  border-radius: 3px; padding: 0 2px; font-weight: 650;
+}
+.preview-more { font-size: 11px; color: var(--ink-faint); padding-top: 3px; }
+
+.suggest-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.suggest-actions input { flex: 1 1 220px; }
+.suggest-actions select { width: auto; flex: 0 0 auto; }
+
+.doc-restore { display: grid; gap: 6px; margin-top: 10px; }
+.doc-restore[hidden] { display: none; }
+
 /* --- toast ------------------------------------------------------------------ */
 
 .toast {
