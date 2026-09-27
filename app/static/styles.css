@@ -69,6 +69,12 @@ body {
 .topbar h1 { margin: 0; font-size: 17px; font-weight: 650; letter-spacing: -0.01em; }
 .topbar p { margin: 1px 0 0; font-size: 12.5px; color: var(--ink-soft); }
 .topbar-actions { display: flex; align-items: center; gap: 10px; }
+
+.install { position: relative; }
+.install-hint { position: absolute; top: calc(100% + 8px); left: 0; z-index: 30;
+  width: max-content; max-width: 220px; padding: 8px 10px; font-size: 12.5px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18); }
 .auth-lock { display: flex; align-items: center; gap: 6px; }
 /* display:flex would otherwise beat the UA stylesheet's [hidden] rule, leaving the
    unlock field on screen for instances that need no key at all. */

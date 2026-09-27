@@ -2249,9 +2249,54 @@
     sync();
   }
 
+  /* --- install --------------------------------------------------------------- */
+  /* Chromium fires beforeinstallprompt once the page is installable (a manifest, served
+     from localhost or HTTPS); holding on to it lets our own button open the browser's
+     prompt. iOS Safari has no such API, so there the button explains Add to Home Screen.
+     Anywhere else, including an already-installed window, the button stays hidden. */
+
+  function initInstall() {
+    var button = $("btn-install");
+    var hint = $("install-hint");
+    var deferred = null;
+    var standalone = window.matchMedia("(display-mode: standalone)").matches ||
+      window.navigator.standalone === true;
+    if (standalone) { return; }
+
+    var ios = /iphone|ipad|ipod/i.test(navigator.userAgent) ||
+      (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+    if (ios) { button.hidden = false; }
+
+    window.addEventListener("beforeinstallprompt", function (event) {
+      event.preventDefault();
+      deferred = event;
+      button.hidden = false;
+    });
+    window.addEventListener("appinstalled", function () {
+      deferred = null;
+      button.hidden = true;
+      hint.hidden = true;
+    });
+
+    button.addEventListener("click", function () {
+      if (!deferred) {
+        hint.hidden = !hint.hidden;
+        button.setAttribute("aria-expanded", String(!hint.hidden));
+        return;
+      }
+      // An event can be prompted only once. If the prompt is dismissed, Chrome fires a
+      // fresh beforeinstallprompt later, and that brings the button back.
+      var prompt = deferred;
+      deferred = null;
+      button.hidden = true;
+      prompt.prompt();
+    });
+  }
+
   /* --- boot ----------------------------------------------------------------- */
 
   initOptionsToggle();
+  initInstall();
   state.apiKey = readStoredKey();
 
   api("/api/config").then(function (config) {

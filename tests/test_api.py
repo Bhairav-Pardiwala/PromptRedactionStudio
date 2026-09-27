@@ -573,6 +573,7 @@ ROUTES = [
     ("GET", "/api/health", False),
     ("GET", "/api/config", False),
     ("GET", "/", False),
+    ("GET", "/static/manifest.json", False),
 ]
 
 
@@ -694,3 +695,11 @@ def test_docs_follow_the_key_unless_overridden(monkeypatch, override, api_key, e
         monkeypatch.delenv("REDACTION_API_KEY", raising=False)
 
     assert main._docs_enabled() is expected
+
+
+def test_manifest_icons_are_served(client):
+    """An icon path that 404s silently makes the page uninstallable."""
+    manifest = client.get("/static/manifest.json").json()
+    assert manifest["start_url"] == "/"
+    for icon in manifest["icons"]:
+        assert client.get(icon["src"]).status_code == 200
