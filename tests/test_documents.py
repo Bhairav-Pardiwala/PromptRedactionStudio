@@ -281,6 +281,80 @@ def test_segment_findings_carry_offsets_into_their_own_segment():
     assert result["segments"] == ["nothing here", "mail <EMAIL_ADDRESS_1>"]
 
 
+# --- one detection covers every copy ---------------------------------------------------
+
+
+def test_csv_name_found_in_a_message_is_also_redacted_in_the_name_column(client):
+    """The case from the sample support-ticket export: the model found the name in the
+    free-text message but not alone in the customer_name column, which left the very
+    person the row was hiding. Here a recognizer that only fires after "Customer " plays
+    the model's part, so the test does not depend on what spaCy happens to catch."""
+    source = (
+        "ticket_id,customer_name,email,message\n"
+        "TKT-1001,Marcus Testwell,marcus.testwell@example.com,Customer Marcus Testwell reports a billing error\n"
+        "TKT-1002,Marcus Testwell,marcus.testwell@example.com,Duplicate of TKT-1001\n"
+        "TKT-1003,Elena Sample,elena.sample@example.com,Card declined\n"
+    )
+    only_after_customer = [
+        {"name": "ctx", "entity": "CUSTOMER", "kind": "regex", "pattern": r"(?<=Customer )Marcus Testwell"}
+    ]
+    body, out = redact_file(
+        client,
+        "tickets.csv",
+        source.encode("utf-8"),
+        entities=["CUSTOMER"],
+        custom_recognizers=only_after_customer,
+    )
+    rows = out.decode("utf-8").splitlines()
+
+    assert "Marcus Testwell" not in out.decode("utf-8")
+    assert rows[1] == "TKT-1001,<CUSTOMER_1>,marcus.testwell@example.com,Customer <CUSTOMER_1> reports a billing error"
+    assert rows[2].startswith("TKT-1002,<CUSTOMER_1>,")
+    # Never detected anywhere, so never guessed at.
+    assert rows[3].startswith("TKT-1003,Elena Sample,")
+
+    carried = [f for f in body["findings"] if f["recognizer"] == redaction.PROPAGATED_RECOGNIZER]
+    assert {f["location"] for f in carried} == {"Row 2", "Row 3"}
+    assert body["mapping"] == {"<CUSTOMER_1>": "Marcus Testwell"}
+
+
+def test_a_wider_copy_found_elsewhere_replaces_a_partial_detection():
+    """spaCy caught only "Priya" of "Priya Placeholder" in one cell, but the whole name
+    in another: the whole name wins in both, rather than leaving the surname behind."""
+    recognizers = [
+        {"name": "whole", "entity": "NAME", "kind": "regex", "pattern": r"Priya Placeholder(?= called)"},
+        {"name": "first", "entity": "NAME", "kind": "regex", "pattern": r"Priya(?= Placeholder signed)"},
+    ]
+    result = redaction.redact_segments(
+        ["Priya Placeholder called", "Priya Placeholder signed"],
+        engine=ENGINE, entities=["NAME"], custom_recognizers=recognizers, store_session=False,
+    )
+    assert result["segments"] == ["<NAME_1> called", "<NAME_1> signed"]
+
+
+def _finding(text, entity_type, start=0):
+    return {"entity_type": entity_type, "start": start, "end": start + len(text),
+            "score": 0.85, "text": text, "recognizer": "test", "explanation": None}
+
+
+def test_propagation_is_whole_word_and_skips_dates():
+    from presidio_analyzer import RecognizerResult
+
+    segments = ["Ann said Monday", "Annual report by Ann on Monday"]
+    per_segment = [
+        (
+            [_finding("Ann", "PERSON"), _finding("Monday", "DATE_TIME", 9)],
+            [RecognizerResult("PERSON", 0, 3, 0.85), RecognizerResult("DATE_TIME", 9, 15, 0.85)],
+        ),
+        ([], []),
+    ]
+    redaction._propagate_detections(segments, [0, 1], per_segment)
+
+    added = [(r.entity_type, segments[1][r.start:r.end], r.start) for r in per_segment[1][1]]
+    assert added == [("PERSON", "Ann", 17)], "matched inside 'Annual', or carried a date"
+    assert per_segment[0][1][0].entity_type == "PERSON" and len(per_segment[0][1]) == 2
+
+
 def test_output_names():
     assert documents.output_name("a.docx", "redacted", ".docx") == "a.redacted.docx"
     assert documents.output_name("a.redacted.docx", "restored", ".docx") == "a.restored.docx"

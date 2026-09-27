@@ -153,6 +153,14 @@ The whole file is redacted as one piece, so `<PERSON_1>` is the same person in a
 table cell and a comment. Detection runs on each paragraph, cell or line separately, so a
 name at the end of one cell is never merged with the start of the next.
 
+A value found anywhere in the file is redacted everywhere it appears. The model can
+recognise "Marcus Testwell" in a sentence and still miss the same name standing alone in
+a `customer_name` column, so every whole-word copy of a detected value is redacted with the
+same token. Those findings show "Same value found elsewhere in the document" as their
+recognizer. Dates are the exception: finding "May" once does not redact every "May" in the
+file. A name the model never recognises anywhere is still missed. Check the preview, and
+use a deny-list recognizer for names that must never get through.
+
 The file is also cleaned in ways you would not see in Word or Excel:
 - The author, last editor, company and manager fields are blanked.
 - Comment and revision authors are blanked.
@@ -419,7 +427,7 @@ entity types.
 ## Tests
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests\ -v     # 91 backend tests
+.\.venv\Scripts\python.exe -m pytest tests\ -v     # 94 backend tests
 dotnet test tray.Tests                             # 25 desktop client tests
 ```
 

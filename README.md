@@ -226,7 +226,7 @@ It is not a statement that the code is free of bugs — see the note at the bott
 ## Tests
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests\ -v     # 91 backend tests
+.\.venv\Scripts\python.exe -m pytest tests\ -v     # 94 backend tests
 dotnet test tray.Tests                             # 25 desktop client tests
 ```
 

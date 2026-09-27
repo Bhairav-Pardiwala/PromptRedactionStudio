@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from presidio_analyzer import BatchAnalyzerEngine
+from presidio_analyzer import BatchAnalyzerEngine, RecognizerResult
 from presidio_anonymizer import AnonymizerEngine, DeanonymizeEngine
 from presidio_anonymizer.entities import OperatorConfig, OperatorResult
 
@@ -355,6 +355,7 @@ def redact_segments(
     # Blank segments (empty lines, spacer cells) cannot hold PII; skip the model for them.
     to_scan = [i for i, segment in enumerate(clean) if segment.strip()]
     per_segment = _analyze_texts([clean[i] for i in to_scan], **analyze_kwargs) if to_scan else []
+    _propagate_detections(clean, to_scan, per_segment)
 
     findings: List[Dict[str, Any]] = []
     results: List[Any] = []
@@ -386,6 +387,63 @@ def redact_segments(
         item.pop("end", None)
     result["segments"] = redacted_segments
     return result
+
+
+# Dates are not carried across a document: finding "May" or "today" once must not
+# redact every other "May" and "today" in the file.
+_NOT_PROPAGATED = {"DATE_TIME"}
+PROPAGATED_RECOGNIZER = "Same value found elsewhere in the document"
+
+
+def _propagate_detections(
+    segments: List[str],
+    scanned: List[int],
+    per_segment: List[Tuple[List[Dict[str, Any]], List[Any]]],
+) -> None:
+    """Redact every other copy of a value the model found anywhere in the document.
+
+    Detection is per segment, and a model that finds "Marcus Testwell" in a ticket's
+    message can miss the same name alone in the customer_name column. Leaving that copy
+    would leak the exact person the rest of the file hides. So each detected value is
+    looked for, whole-word and case-sensitive, in every segment, and any copy not already
+    covered is added with the same entity type. A copy that only partly overlaps an
+    existing detection -- "Priya" found inside "Priya Placeholder" -- is still added, and
+    the anonymizer keeps the wider span.
+
+    Mutates `per_segment` in place: new findings and results are appended.
+    """
+    seen: Dict[Tuple[str, str], float] = {}
+    for segment_findings, _ in per_segment:
+        for finding in segment_findings:
+            value = finding["text"]
+            if finding["entity_type"] in _NOT_PROPAGATED or len(value.strip()) < 3:
+                continue
+            key = (value, finding["entity_type"])
+            seen[key] = max(seen.get(key, 0.0), finding["score"])
+    if not seen:
+        return
+
+    # Longest first, so "Jane Doe" claims its span before "Jane" is considered.
+    for (value, entity_type), score in sorted(seen.items(), key=lambda kv: -len(kv[0][0])):
+        pattern = re.compile(r"(?<!\w)" + re.escape(value) + r"(?!\w)")
+        for index, (segment_findings, segment_results) in zip(scanned, per_segment):
+            for match in pattern.finditer(segments[index]):
+                start, end = match.span()
+                covered = any(r.start <= start and end <= r.end for r in segment_results)
+                if covered:
+                    continue
+                segment_results.append(RecognizerResult(entity_type, start, end, score))
+                segment_findings.append(
+                    {
+                        "entity_type": entity_type,
+                        "start": start,
+                        "end": end,
+                        "score": score,
+                        "text": value,
+                        "recognizer": PROPAGATED_RECOGNIZER,
+                        "explanation": None,
+                    }
+                )
 
 
 def restore_segments(segments: List[str], session_id: str) -> Dict[str, Any]:
