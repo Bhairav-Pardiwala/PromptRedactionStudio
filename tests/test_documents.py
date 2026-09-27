@@ -332,6 +332,112 @@ def test_a_wider_copy_found_elsewhere_replaces_a_partial_detection():
     assert result["segments"] == ["<NAME_1> called", "<NAME_1> signed"]
 
 
+# --- batches: several documents, one token set ------------------------------------------
+
+
+SECOND_FILE_CSV = "name,note\nJane Doe,called again\nJohn Roe,new customer\n"
+MARK_BOTH = [
+    {"name": "names", "entity": "PERSON", "kind": "deny_list", "deny_list": ["Jane Doe", "John Roe"]}
+]
+
+
+def test_a_second_document_joins_the_batch_and_shares_its_tokens(client):
+    first, _ = redact_file(client, "complaint.docx", build_docx(), custom_recognizers=MARK_BOTH)
+    jane = next(t for t, v in first["mapping"].items() if v == "Jane Doe")
+
+    second, out = redact_file(
+        client, "people.csv", SECOND_FILE_CSV.encode("utf-8"),
+        custom_recognizers=MARK_BOTH, session_id=first["session_id"],
+    )
+    rows = out.decode("utf-8").splitlines()
+
+    assert second["session_id"] == first["session_id"]
+    assert rows[1] == jane + ",called again"
+    john = rows[2].split(",")[0]
+    assert john.startswith("<PERSON_") and john != jane
+    # This file's tokens only; the batch as a whole lives in the session.
+    assert second["mapping"] == {jane: "Jane Doe", john: "John Roe"}
+
+    reply = "Dear " + jane + " and " + john + ", about " + next(
+        t for t, v in first["mapping"].items() if v == "4111 1111 1111 1111"
+    )
+    restored = client.post("/api/restore", json={"text": reply, "session_id": first["session_id"]})
+    assert restored.json()["restored_text"] == "Dear Jane Doe and John Roe, about 4111 1111 1111 1111"
+
+
+def test_redacting_a_file_again_in_its_batch_gives_the_same_tokens(client):
+    first, out1 = redact_file(client, "complaint.docx", build_docx(), custom_recognizers=MARK_BOTH)
+    redact_file(client, "people.csv", SECOND_FILE_CSV.encode("utf-8"),
+                custom_recognizers=MARK_BOTH, session_id=first["session_id"])
+    again, out2 = redact_file(client, "complaint.docx", build_docx(),
+                              custom_recognizers=MARK_BOTH, session_id=first["session_id"])
+
+    assert again["mapping"] == first["mapping"]
+    assert part(out2, "word/document.xml") == part(out1, "word/document.xml")
+
+
+def test_allow_listing_a_value_unredacts_it_and_keeps_every_other_token(client):
+    first, _ = redact_file(client, "people.csv", SECOND_FILE_CSV.encode("utf-8"), custom_recognizers=MARK_BOTH)
+    john = next(t for t, v in first["mapping"].items() if v == "John Roe")
+
+    again, out = redact_file(
+        client, "people.csv", SECOND_FILE_CSV.encode("utf-8"), custom_recognizers=MARK_BOTH,
+        allow_list=["Jane Doe"], session_id=first["session_id"],
+    )
+    assert "Jane Doe,called again" in out.decode("utf-8")
+    assert again["mapping"] == {john: "John Roe"}
+
+
+def test_a_value_found_in_one_file_is_redacted_in_the_rest_of_the_batch(client):
+    """The model caught Marcus in file one (a recognizer that only fires after
+    "Customer "); file two never says "Customer", so only the batch knows his name."""
+    only_after_customer = [
+        {"name": "ctx", "entity": "CUSTOMER", "kind": "regex", "pattern": r"(?<=Customer )Marcus Testwell"}
+    ]
+    first, _ = redact_file(
+        client, "a.txt", b"Customer Marcus Testwell called.",
+        entities=["CUSTOMER"], custom_recognizers=only_after_customer,
+    )
+    second, out = redact_file(
+        client, "b.txt", b"Refund approved for Marcus Testwell.",
+        entities=["CUSTOMER"], custom_recognizers=only_after_customer,
+        session_id=first["session_id"],
+    )
+    assert out == b"Refund approved for <CUSTOMER_1>."
+
+    # Un-redacting it (allow-list) wins over what the batch remembers.
+    third, out = redact_file(
+        client, "b.txt", b"Refund approved for Marcus Testwell.",
+        entities=["CUSTOMER"], custom_recognizers=only_after_customer,
+        allow_list=["Marcus Testwell"], session_id=first["session_id"],
+    )
+    assert out == b"Refund approved for Marcus Testwell."
+
+
+def test_joining_an_unknown_batch_is_a_400(client):
+    response = client.post("/api/documents/redact", json={
+        "filename": "x.txt", "content_base64": b64(b"Jane Doe"), "engine": ENGINE,
+        "session_id": "no-such-session",
+    })
+    assert response.status_code == 400
+    assert "expired" in response.json()["detail"]
+
+
+def test_a_batch_refuses_a_second_aes_key_for_the_same_entity(client):
+    def encrypt_with(key, session_id=None):
+        return client.post("/api/documents/redact", json={
+            "filename": "x.txt", "content_base64": b64(b"mail jane.doe@example.com"),
+            "engine": ENGINE, "entities": ["EMAIL_ADDRESS"], "session_id": session_id,
+            "default_operator": {"type": "encrypt", "params": {"key": key}},
+        })
+
+    first = encrypt_with("0123456789abcdef")
+    assert first.status_code == 200, first.text
+    second = encrypt_with("fedcba9876543210", first.json()["session_id"])
+    assert second.status_code == 400
+    assert "same AES key" in second.json()["detail"]
+
+
 # --- suggestions ------------------------------------------------------------------------
 
 

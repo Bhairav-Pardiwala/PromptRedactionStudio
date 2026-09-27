@@ -136,11 +136,40 @@ your prompt anywhere — Presidio runs locally, and no LLM is called.
 
 ## Documents
 
-The **Document** tab redacts a whole file with the same options as a prompt. Drop in a
-file, click **Redact document**, review the words left over, and download the redacted copy. Give that
-copy to a model. Paste the model's reply into the restore box to get the real values back.
-If the model edited the file and handed it back, drop that file into the restore area
-instead.
+The **Document** tab redacts whole files with the same options as a prompt. Drop in one or
+more files; each is redacted as soon as it arrives. Review the words left over, then
+download each file or **Download all** as a zip. Give the files to a model. Paste its reply
+into the restore box to get the real values back. If the model edited files and handed them
+back, drop those into the restore area instead: one file downloads as is, several come back
+as a zip.
+
+### Batches
+
+Every file you add joins one **batch**, and the whole batch shares one set of tokens.
+- **Tokens:** Jane Doe is `<PERSON_1>` in the complaint letter, the ticket export and the
+  spreadsheet alike. A file added an hour later reuses those tokens, and new people
+  continue the numbering.
+- **Values spread across files:** a value found in any file is redacted in every file, even
+  where the model misses it.
+- **Restore:** one restore, of a reply or of files, covers the whole batch.
+- **Re-running:** **Redact all again** re-runs every file after you change the options. The
+  tokens already given out stay the same.
+- **Removing a file:** × takes a file out of the batch. Its tokens stay reserved, so a reply
+  that quotes them still restores.
+- **Starting over:** **New batch** (click twice) forgets the batch and its mapping, and the
+  next file starts again at `<PERSON_1>`.
+
+The batch is one server session, which expires an hour after it was last used. Behind the
+scenes, each file is a `POST /api/documents/redact` that passes the previous response's
+`session_id`.
+
+### Un-redacting a value
+
+Each row of the token map has a **↺** button that stops redacting that value. The value is
+added to the **Allow-list**, removed from any mark you made, and every file (or the prompt,
+on the Text tab) is redacted again. Other tokens keep their numbers. The allow-list is
+exact-match, so only that spelling is let through. Delete it from the Allow-list to redact
+it again.
 
 | Type | What is redacted | You get back |
 |---|---|---|
@@ -395,7 +424,13 @@ and returns the redacted file as `content_base64`, a `filename` for it, `finding
 `location` each, the token `mapping`, `warnings`, and `suggestions`. Each suggestion is a
 `{term, count}` for a word left in the redacted file, capped at 300, with the full count in
 `suggestions_total`. Its `session_id` works with `/api/restore` as well, for a reply about the
-document. See [Documents](#documents).
+document.
+
+To add a file to a batch, pass an earlier response's `session_id` in the request. Values
+that session has already tokenised keep their tokens, new ones continue its numbering, and
+`mapping` lists just the tokens this file uses. An expired or unknown `session_id` returns a
+400. So does an `encrypt` operator whose AES key differs from the one the batch's earlier
+files used. See [Documents](#documents).
 
 A worked round trip with real request and response bodies is in the
 [README](../README.md#sample-run).
@@ -441,7 +476,7 @@ entity types.
 ## Tests
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests\ -v     # 121 backend tests
+.\.venv\Scripts\python.exe -m pytest tests\ -v     # 131 backend tests
 dotnet test tray.Tests                             # 25 desktop client tests
 ```
 

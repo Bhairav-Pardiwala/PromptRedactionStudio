@@ -389,15 +389,29 @@ tbody tr:hover { background: var(--line-soft); }
 .dropzone-small { min-height: 0; padding: 10px; flex-direction: row; border-width: 1px; }
 .dropzone-small .dropzone-main { font-size: 12.5px; font-weight: 550; }
 
-.file-card {
-  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-  padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius);
-  background: var(--bg);
+.file-list {
+  list-style: none; margin: 8px 0 0; padding: 0;
+  border: 1px solid var(--line); border-radius: 8px;
+  max-height: 300px; overflow-y: auto;
 }
-.file-card[hidden] { display: none; }
-.file-card-icon { font-size: 22px; line-height: 1; }
-.file-card-name { font-weight: 600; overflow-wrap: anywhere; }
-.file-card-size { color: var(--ink-faint); font-size: 12px; flex: 1 1 auto; }
+.file-row {
+  display: grid; align-items: center; gap: 10px;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto auto;
+  padding: 7px 10px; border-bottom: 1px solid var(--line-soft);
+}
+.file-row:last-child { border-bottom: 0; }
+.file-row-icon { font-size: 16px; line-height: 1; }
+.file-row-name { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-row-size { color: var(--ink-faint); font-size: 12px; white-space: nowrap; }
+@media (max-width: 600px) {
+  .file-row { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .file-row-size { display: none; }
+}
+
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap;
+}
 
 .doc-summary {
   display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;

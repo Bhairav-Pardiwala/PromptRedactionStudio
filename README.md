@@ -125,16 +125,18 @@ alongside it.
 
 ### A document
 
-1. Switch to the **Document** tab and drop in a file.
-2. Click **Redact document**. Under **Anything else to redact?** you get every word still in
-   the redacted file, without the articles, prepositions and pronouns. Tick anything the
-   model missed, or type a phrase, and redact it too. Then download the redacted copy.
-3. Give it to a model. Paste the model's reply into the restore box. If the model edited the
-   file and handed it back, drop that file in instead to get a copy with the real values.
+1. Switch to the **Document** tab and drop in one or more files. They are redacted straight
+   away, and you can keep adding more to the same batch.
+2. Under **Anything else to redact?** you get every word still in the redacted files, without
+   the articles, prepositions and pronouns. Tick anything the model missed, or type a
+   phrase, and every file is redacted again with it. To stop redacting a value, press
+   **↺** next to it in the token map.
+3. Download each file, or **Download all** as a zip, and give them to a model. Paste its
+   reply into the restore box, or drop the files it edited back in, to get the real values.
 
-One person gets one token across the whole file, including headers, tables, comments and
-hyperlink addresses. Author metadata and tracked deletions are removed. Details are in the
-[guide](docs/GUIDE.md#documents).
+One person gets one token across every file in the batch, including headers, tables,
+comments and hyperlink addresses. Author metadata and tracked deletions are removed.
+Details are in the [guide](docs/GUIDE.md#documents).
 
 ### Against the API
 
@@ -227,7 +229,7 @@ It is not a statement that the code is free of bugs — see the note at the bott
 ## Tests
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests\ -v     # 121 backend tests
+.\.venv\Scripts\python.exe -m pytest tests\ -v     # 131 backend tests
 dotnet test tray.Tests                             # 25 desktop client tests
 ```
 

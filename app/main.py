@@ -403,11 +403,16 @@ def post_document_redact(request: schemas.DocumentRedactRequest) -> Dict[str, An
     """Redact a whole file with one consistent set of tokens, and hand back the copy.
 
     The same session id works for /api/restore, so an LLM's reply about the document
-    restores exactly as a reply about a prompt does.
+    restores exactly as a reply about a prompt does. Pass an earlier response's
+    `session_id` to add this file to that batch: people already tokenised keep their
+    tokens, and one restore covers every file.
     """
     document = _open_upload(request.filename, request.content_base64)
     result = _run_redaction(
-        redaction.redact_segments, document.segments, **_redact_options(request)
+        redaction.redact_segments,
+        document.segments,
+        session_id=request.session_id,
+        **_redact_options(request),
     )
     try:
         content = document.rebuild(result["segments"])

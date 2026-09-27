@@ -7,6 +7,7 @@ id, and expires after a TTL. Nothing is written to disk.
 
 from __future__ import annotations
 
+import contextlib
 import re
 import secrets
 import threading
@@ -49,6 +50,15 @@ class RedactionSession:
     placeholder_map: Dict[str, str] = field(default_factory=dict)
     encrypted_spans: List[Dict[str, str]] = field(default_factory=list)
     encrypt_keys: Dict[str, str] = field(default_factory=dict)
+    # Expiry runs from last use, so a batch of documents that keeps growing does not
+    # lose its mapping an hour after the first file.
+    touched_at: float = 0.0
+    # Held from token allocation until the new tokens are merged in, so two files added
+    # to one batch at the same moment cannot both be handed <PERSON_4>.
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        self.touched_at = self.touched_at or self.created_at
 
 
 class SessionStore:
@@ -62,11 +72,11 @@ class SessionStore:
 
     def _purge(self) -> None:
         cutoff = time.time() - self._ttl
-        for key in [k for k, v in self._data.items() if v.created_at < cutoff]:
+        for key in [k for k, v in self._data.items() if v.touched_at < cutoff]:
             del self._data[key]
         # Bound memory even if nothing has expired yet.
         while len(self._data) > self._max:
-            oldest = min(self._data.items(), key=lambda kv: kv[1].created_at)[0]
+            oldest = min(self._data.items(), key=lambda kv: kv[1].touched_at)[0]
             del self._data[oldest]
 
     def create(self) -> RedactionSession:
@@ -80,6 +90,8 @@ class SessionStore:
         with self._lock:
             self._purge()
             session = self._data.get(session_id)
+            if session is not None:
+                session.touched_at = time.time()
         if session is None:
             raise RedactionError(
                 "That redaction session has expired or was never created. "
@@ -259,19 +271,54 @@ def _anonymize(
     default_operator: Optional[Dict[str, Any]],
     per_entity_operators: Optional[Dict[str, Dict[str, Any]]],
     store_session: bool,
+    session: Optional[RedactionSession] = None,
 ) -> Dict[str, Any]:
-    """Everything after detection: allocate tokens, rewrite, and optionally store."""
+    """Everything after detection: allocate tokens, rewrite, and optionally store.
+
+    With `session`, the redaction joins it: tokens it already holds are reused, new ones
+    continue its numbering, and the results are merged into it -- all under the session's
+    lock, so concurrent additions to one batch cannot hand out the same token twice.
+    """
+    with session.lock if session is not None else contextlib.nullcontext():
+        return _anonymize_into(
+            text, findings, results, default_operator, per_entity_operators, store_session,
+            session,
+        )
+
+
+def _anonymize_into(
+    text: str,
+    findings: List[Dict[str, Any]],
+    results: List[Any],
+    default_operator: Optional[Dict[str, Any]],
+    per_entity_operators: Optional[Dict[str, Dict[str, Any]]],
+    store_session: bool,
+    session: Optional[RedactionSession],
+) -> Dict[str, Any]:
+    encrypt_keys = operators.encrypt_keys_in_use(default_operator, per_entity_operators)
+    if session is not None:
+        for entity_type, key in encrypt_keys.items():
+            if session.encrypt_keys.get(entity_type, key) != key:
+                raise RedactionError(
+                    "Use the same AES key for every file in a batch: this one differs "
+                    "from the key its earlier files were encrypted with."
+                )
+
     detected_types = []
     for finding in findings:
         if finding["entity_type"] not in detected_types:
             detected_types.append(finding["entity_type"])
 
     operator_map, allocator, chosen = operators.build_operators(
-        default_operator, per_entity_operators, detected_types
+        default_operator,
+        per_entity_operators,
+        detected_types,
+        existing_mapping=session.placeholder_map if session is not None else None,
     )
 
     if not results:
-        session = store.create() if store_session else None
+        if session is None and store_session:
+            session = store.create()
         return {
             "session_id": session.session_id if session else None,
             "original_text": text,
@@ -310,10 +357,11 @@ def _anonymize(
         if item.operator == "encrypt":
             encrypted_spans.append({"entity_type": item.entity_type, "text": item_text})
 
-    encrypt_keys = operators.encrypt_keys_in_use(default_operator, per_entity_operators)
-
-    session = None
-    if store_session:
+    if session is not None:
+        session.placeholder_map.update(mapping)
+        session.encrypted_spans.extend(encrypted_spans)
+        session.encrypt_keys.update(encrypt_keys)
+    elif store_session:
         session = store.create()
         session.placeholder_map = mapping
         session.encrypted_spans = encrypted_spans
@@ -338,9 +386,14 @@ def redact_segments(
     default_operator: Optional[Dict[str, Any]] = None,
     per_entity_operators: Optional[Dict[str, Dict[str, Any]]] = None,
     store_session: bool = True,
+    session_id: Optional[str] = None,
     **analyze_kwargs: Any,
 ) -> Dict[str, Any]:
     """Redact a document's text segments in one pass, so tokens are consistent across it.
+
+    With `session_id`, the document joins that session's batch: a person already
+    tokenised in an earlier file keeps their token here, and new values continue its
+    numbering. The response's `mapping` lists only the tokens this document uses.
 
     Redacting each paragraph or cell on its own would restart <PERSON_1> in every one of
     them. So detection runs per segment -- a model must not read one cell's name into the
@@ -351,11 +404,17 @@ def redact_segments(
     """
     clean = [segment.replace("\x1f", "") for segment in segments]
     joined = _validate_text(SEGMENT_SEP.join(clean), MAX_DOCUMENT_CHARS)
+    # Looked up before any detection work, so an expired batch fails fast.
+    session = store.get(session_id) if session_id else None
 
     # Blank segments (empty lines, spacer cells) cannot hold PII; skip the model for them.
     to_scan = [i for i, segment in enumerate(clean) if segment.strip()]
     per_segment = _analyze_texts([clean[i] for i in to_scan], **analyze_kwargs) if to_scan else []
-    _propagate_detections(clean, to_scan, per_segment)
+    _propagate_detections(
+        clean, to_scan, per_segment,
+        known=dict(session.placeholder_map) if session is not None else None,
+        allow_list=analyze_kwargs.get("allow_list"),
+    )
 
     findings: List[Dict[str, Any]] = []
     results: List[Any] = []
@@ -374,8 +433,11 @@ def redact_segments(
             results.append(result)
 
     result = _anonymize(
-        joined, findings, results, default_operator, per_entity_operators, store_session
+        joined, findings, results, default_operator, per_entity_operators, store_session,
+        session,
     )
+    if session is not None:
+        result["session_id"] = session.session_id
     redacted_segments = result.pop("redacted_text").split(SEGMENT_SEP)
     if len(redacted_segments) != len(clean):  # pragma: no cover - spans never cross a separator
         raise RedactionError("The document could not be split back into its parts.")
@@ -399,8 +461,15 @@ def _propagate_detections(
     segments: List[str],
     scanned: List[int],
     per_segment: List[Tuple[List[Dict[str, Any]], List[Any]]],
+    known: Optional[Dict[str, str]] = None,
+    allow_list: Optional[List[str]] = None,
 ) -> None:
     """Redact every other copy of a value the model found anywhere in the document.
+
+    `known` is a batch session's mapping (token -> original): a value tokenised in an
+    earlier file is redacted in this one too, even where the model misses it here. Values
+    on the allow-list are never spread -- that is how un-redacting a token sticks, since
+    the session still remembers it.
 
     Detection is per segment, and a model that finds "Marcus Testwell" in a ticket's
     message can miss the same name alone in the customer_name column. Leaving that copy
@@ -420,6 +489,14 @@ def _propagate_detections(
                 continue
             key = (value, finding["entity_type"])
             seen[key] = max(seen.get(key, 0.0), finding["score"])
+    for token, value in (known or {}).items():
+        entity_type = token[1:-1].rpartition("_")[0]
+        if entity_type in _NOT_PROPAGATED or len(value.strip()) < 3:
+            continue
+        seen.setdefault((value, entity_type), 1.0)
+    for value in allow_list or []:
+        for key in [k for k in seen if k[0] == value]:
+            del seen[key]
     if not seen:
         return
 

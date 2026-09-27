@@ -149,34 +149,33 @@
     <!-- Document mode. Built on the same options panel; the file is held in memory only. -->
     <div id="pane-doc" role="tabpanel" aria-labelledby="tab-doc" hidden>
       <div class="panel-head">
-        <h2 class="panel-title">Your document</h2>
-        <span id="doc-status" class="pill pill-muted">No file</span>
+        <h2 class="panel-title">Your documents</h2>
+        <span id="doc-status" class="pill pill-muted">No files</span>
       </div>
 
+      <!-- Every file in the batch shares one session, so one person keeps one token
+           across all of them. The drop zone stays, so files can be added at any time. -->
       <label class="dropzone" id="doc-drop">
-        <input type="file" id="doc-file" hidden>
+        <input type="file" id="doc-file" multiple hidden>
         <span class="dropzone-icon" aria-hidden="true">&#128196;</span>
-        <span class="dropzone-main">Drop a file or <u>browse</u></span>
+        <span class="dropzone-main" id="doc-drop-main">Drop files or <u>browse</u></span>
         <span class="dropzone-sub" id="doc-types"></span>
       </label>
 
-      <div class="file-card" id="doc-card" hidden>
-        <span class="file-card-icon" aria-hidden="true">&#128196;</span>
-        <span class="file-card-name" id="doc-name"></span>
-        <span class="file-card-size" id="doc-size"></span>
-        <button type="button" class="btn btn-ghost btn-tiny" id="btn-doc-remove" aria-label="Remove file">&times;</button>
-        <button type="button" class="btn btn-primary" id="btn-doc-redact">Redact document</button>
-      </div>
-
-      <div id="doc-result" hidden>
+      <div id="doc-batch" hidden>
         <div class="doc-summary">
           <span id="doc-summary"></span>
           <div class="row-actions">
-            <button type="button" class="btn btn-primary" id="btn-doc-download"></button>
-            <button type="button" class="btn btn-ghost btn-tiny" id="btn-doc-again">Redact again</button>
+            <button type="button" class="btn btn-primary" id="btn-doc-download-all">&#11015; Download all (.zip)</button>
+            <button type="button" class="btn btn-ghost btn-tiny" id="btn-doc-again">Redact all again</button>
+            <button type="button" class="btn btn-ghost btn-tiny btn-danger" id="btn-doc-new">New batch</button>
           </div>
         </div>
+        <ul class="file-list" id="doc-files" aria-label="Files in this batch"></ul>
         <div id="doc-warnings"></div>
+      </div>
+
+      <div id="doc-result" hidden>
 
         <!-- Words still in the redacted file, for catching what the model missed. -->
         <div class="panel-head">
@@ -208,10 +207,10 @@
     <p class="hint" id="restore-summary"></p>
 
     <div class="doc-restore" id="doc-restore" hidden>
-      <span class="hint">&hellip;or drop the edited file back to get a copy with the real values.</span>
+      <span class="hint">&hellip;or drop edited files back to get copies with the real values.</span>
       <label class="dropzone dropzone-small" id="doc-restore-drop">
-        <input type="file" id="doc-restore-file" hidden>
-        <span class="dropzone-main">&#128196; Drop a redacted file or <u>browse</u></span>
+        <input type="file" id="doc-restore-file" multiple hidden>
+        <span class="dropzone-main">&#128196; Drop redacted files or <u>browse</u></span>
       </label>
     </div>
   </section>
@@ -245,10 +244,12 @@
     </div>
     <div class="table-scroll">
       <table id="mapping-table" hidden>
-        <thead><tr><th>Token</th><th>Original</th></tr></thead>
+        <thead><tr><th>Token</th><th>Original</th><th><span class="visually-hidden">Un-redact</span></th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
+    <p class="hint" id="mapping-unredact-hint" hidden>&#8634; keeps that exact value readable
+      everywhere: it is added to the Allow-list, and removing it there redacts it again.</p>
     <p class="hint warn" id="mapping-warning" hidden>
       This map is the key that undoes the redaction. It is kept in memory only and expires
       after an hour.

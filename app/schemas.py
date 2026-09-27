@@ -63,6 +63,8 @@ class DocumentRedactRequest(RedactRequest):
 
     filename: str
     content_base64: str
+    # Join an earlier document's session, so the whole batch shares one token set.
+    session_id: Optional[str] = None
 
 
 class DocumentRestoreRequest(BaseModel):
