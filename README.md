@@ -136,7 +136,9 @@ alongside it.
 
 One person gets one token across every file in the batch, including headers, tables,
 comments and hyperlink addresses. Author metadata and tracked deletions are removed.
-Details are in the [guide](docs/GUIDE.md#documents).
+Details are in the [guide](docs/GUIDE.md#documents). To try it, use the made-up files in
+[`samples/documents`](samples/documents): Word, Excel, PDF, CSV and text, including a few
+names the model misses on purpose.
 
 ### Against the API
 

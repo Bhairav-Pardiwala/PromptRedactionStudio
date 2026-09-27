@@ -1,0 +1,13 @@
+﻿ticket_id,customer_name,email,phone,message
+TKT-1001,Marcus Testwell,john.roe@example.com,+1 (415) 555-0101,Customer Marcus Testwell reports an issue. Contact them at +1 (415) 555-0101.
+TKT-1002,Elena Sample,priya.placeholder@example.com,+1 (415) 555-0102,Customer Elena Sample reports an issue. Contact them at +1 (415) 555-0102.
+TKT-1003,Tomas Fictitious,marcus.testwell@example.com,+1 (415) 555-0103,Customer Tomas Fictitious reports an issue. Contact them at +1 (415) 555-0103.
+TKT-1004,Sarah Dummy,elena.sample@example.com,+1 (415) 555-0104,Customer Sarah Dummy reports an issue. Contact them at +1 (415) 555-0104.
+TKT-1005,Robert Test,jane.doe@example.com,+1 (415) 555-0105,Customer Robert Test reports an issue. Contact them at +1 (415) 555-0105.
+TKT-1006,Jane Doe,john.roe@example.com,+1 (415) 555-0106,Customer Jane Doe reports an issue. Contact them at +1 (415) 555-0106.
+TKT-1007,John Roe,priya.placeholder@example.com,+1 (415) 555-0107,Customer John Roe reports an issue. Contact them at +1 (415) 555-0107.
+TKT-1008,Priya Placeholder,marcus.testwell@example.com,+1 (415) 555-0108,Customer Priya Placeholder reports an issue. Contact them at +1 (415) 555-0108.
+TKT-1009,Marcus Testwell,elena.sample@example.com,+1 (415) 555-0109,Customer Marcus Testwell reports an issue. Contact them at +1 (415) 555-0109.
+TKT-1010,Elena Sample,jane.doe@example.com,+1 (415) 555-0110,Customer Elena Sample reports an issue. Contact them at +1 (415) 555-0110.
+TKT-1011,Tomas Fictitious,john.roe@example.com,+1 (415) 555-0111,Customer Tomas Fictitious reports an issue. Contact them at +1 (415) 555-0111.
+TKT-1012,Sarah Dummy,priya.placeholder@example.com,+1 (415) 555-0112,Customer Sarah Dummy reports an issue. Contact them at +1 (415) 555-0112.
