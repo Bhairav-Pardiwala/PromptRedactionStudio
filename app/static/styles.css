@@ -439,6 +439,28 @@ tbody tr:hover { background: var(--line-soft); }
 .chip.is-checked { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
 .chip-count { font-size: 10.5px; color: var(--ink-faint); }
 
+/* Hover preview for a suggested word. Fixed, so the scrolling chip list cannot clip it;
+   above the footer (30) and toast (50), level with the context menu. */
+.suggest-preview {
+  position: fixed; z-index: 60;
+  max-width: min(520px, calc(100vw - 16px));
+  padding: 8px 10px;
+  background: var(--panel); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.22);
+  pointer-events: none;
+}
+.suggest-preview[hidden] { display: none; }
+.preview-line { padding: 3px 0; }
+.preview-line + .preview-line { border-top: 1px solid var(--line-soft); }
+.preview-file { display: block; font-size: 10.5px; color: var(--ink-faint); }
+.preview-text { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.preview-text mark {
+  background: var(--accent-soft); color: var(--accent);
+  border-radius: 3px; padding: 0 2px; font-weight: 650;
+}
+.preview-more { font-size: 11px; color: var(--ink-faint); padding-top: 3px; }
+
 .suggest-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
 .suggest-actions input { flex: 1 1 220px; }
 .suggest-actions select { width: auto; flex: 0 0 auto; }

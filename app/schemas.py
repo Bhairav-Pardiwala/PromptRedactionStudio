@@ -112,9 +112,17 @@ class RestoreResponse(BaseModel):
     not_found: List[str]
 
 
+class SuggestionContext(BaseModel):
+    before: str
+    match: str
+    after: str
+
+
 class Suggestion(BaseModel):
     term: str
     count: int
+    # A few places the word appears, from the redacted text, for a hover preview.
+    contexts: List[SuggestionContext] = Field(default_factory=list)
 
 
 class DocumentRedactResponse(BaseModel):

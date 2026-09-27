@@ -193,7 +193,10 @@ next list is for.
 **Anything else to redact?** lists every distinct word still in the redacted file, with the
 most likely ones first: capitalised words and words with digits, then the most frequent.
 Articles, auxiliary verbs, prepositions, conjunctions and pronouns are left out, since they
-can never be personal data. Tick any word the model missed, or type a word or phrase into
+can never be personal data. Hover over a word (or tab to it) to see where it appears: up to
+three snippets such as "…TKT-1002,**Elena** Sample,<EMAIL_ADDRESS_2>…", labelled with the file
+when a batch has several. The snippets come from the redacted text, so anything already
+redacted reads as its token. Tick any word the model missed, or type a word or phrase into
 the box below the list, such as "Elena Sample". Pick what to redact it as, and press
 **Redact selected**. The document is redacted again with those terms added, and they drop
 off the list.
@@ -476,7 +479,7 @@ entity types.
 ## Tests
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests\ -v     # 131 backend tests
+.\.venv\Scripts\python.exe -m pytest tests\ -v     # 136 backend tests
 dotnet test tray.Tests                             # 25 desktop client tests
 ```
 

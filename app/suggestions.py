@@ -83,21 +83,58 @@ _WORD = re.compile(r"[^\W_][\w'’\-]*")
 _POSSESSIVE = re.compile(r"['’]s$", re.IGNORECASE)
 
 DEFAULT_LIMIT = 300
+# Where a word appears, so the user can judge it without opening the file: a few
+# occurrences, each with some text either side.
+CONTEXTS_PER_TERM = 3
+CONTEXT_CHARS = 40
+_SPACE = re.compile(r"\s+")
+_CUT_START = re.compile(r"^\w+")
+_CUT_END = re.compile(r"\w+$")
+
+
+def _context(segment: str, start: int, end: int) -> Dict[str, str]:
+    """The text either side of segment[start:end], cut at word boundaries, one line."""
+    lo = max(0, start - CONTEXT_CHARS)
+    hi = min(len(segment), end + CONTEXT_CHARS)
+    # Never end the window inside a placeholder token: widen it to take the whole token.
+    for token in _TOKEN.finditer(segment):
+        if token.start() < lo < token.end():
+            lo = token.start()
+        if token.start() < hi < token.end():
+            hi = token.end()
+    before = segment[lo:start]
+    after = segment[end:hi]
+    # Drop only a word actually cut in half at either edge. Trimming back to the nearest
+    # space instead would empty a CSV row, where fields are separated by commas.
+    if lo > 0 and segment[lo - 1 : lo + 1].isalnum():
+        before = _CUT_START.sub("", before)
+    if hi < len(segment) and segment[hi - 1 : hi + 1].isalnum():
+        after = _CUT_END.sub("", after)
+    return {
+        "before": ("…" if lo > 0 else "") + _SPACE.sub(" ", before).lstrip(),
+        "match": segment[start:end],
+        "after": _SPACE.sub(" ", after).rstrip() + ("…" if hi < len(segment) else ""),
+    }
 
 
 def suggest_terms(segments: List[str], limit: int = DEFAULT_LIMIT) -> Tuple[List[Dict], int]:
     """Distinct words left in redacted text, most likely to be personal data first.
 
-    Returns up to `limit` of `{"term", "count"}` and the total number of distinct words.
-    Capitalised words and words with digits come first -- that is where names and IDs
-    are -- then the most frequent, then alphabetical, so the order is stable.
+    Returns up to `limit` of `{"term", "count", "contexts"}` and the total number of
+    distinct words. Capitalised words and words with digits come first -- that is where
+    names and IDs are -- then the most frequent, then alphabetical, so the order is stable.
+    Each context is `{"before", "match", "after"}` taken from the redacted text, so
+    anything already redacted shows as its token, never as the value.
     """
     counts: Dict[str, int] = {}
     spelling: Dict[str, str] = {}
+    contexts: Dict[str, List[Dict[str, str]]] = {}
 
     for segment in segments:
-        text = _TOKEN.sub(" ", segment)
-        for match in _WORD.finditer(text):
+        # Blank tokens out with spaces rather than removing them, so offsets still line
+        # up with the segment the contexts are cut from.
+        masked = _TOKEN.sub(lambda m: " " * len(m.group(0)), segment)
+        for match in _WORD.finditer(masked):
             word = _POSSESSIVE.sub("", match.group(0)).strip("'’-")
             if len(word) < 2:
                 continue
@@ -106,6 +143,10 @@ def suggest_terms(segments: List[str], limit: int = DEFAULT_LIMIT) -> Tuple[List
                 continue
             counts[key] = counts.get(key, 0) + 1
             spelling.setdefault(key, word)
+            found = contexts.setdefault(key, [])
+            if len(found) < CONTEXTS_PER_TERM:
+                start = match.start() + match.group(0).index(word)
+                found.append(_context(segment, start, start + len(word)))
 
     def rank(key: str) -> Tuple[int, int, str]:
         word = spelling[key]
@@ -113,4 +154,6 @@ def suggest_terms(segments: List[str], limit: int = DEFAULT_LIMIT) -> Tuple[List
         return (0 if likely else 1, -counts[key], key)
 
     ordered = sorted(counts, key=rank)
-    return [{"term": spelling[k], "count": counts[k]} for k in ordered[:limit]], len(ordered)
+    return [
+        {"term": spelling[k], "count": counts[k], "contexts": contexts[k]} for k in ordered[:limit]
+    ], len(ordered)

@@ -1663,13 +1663,25 @@
 
   var SUGGESTION_LIMIT = 300;
 
+  var PREVIEW_CONTEXTS = 3;
+
   function mergeSuggestions(done) {
     var byKey = {};
     done.forEach(function (entry) {
       entry.result.suggestions.forEach(function (suggestion) {
         var key = suggestion.term.toLowerCase();
-        if (byKey[key]) { byKey[key].count += suggestion.count; }
-        else { byKey[key] = { term: suggestion.term, count: suggestion.count, key: key }; }
+        var merged = byKey[key];
+        if (merged) { merged.count += suggestion.count; }
+        else {
+          merged = byKey[key] = { term: suggestion.term, count: suggestion.count, key: key, contexts: [] };
+        }
+        // Keep the file each snippet came from; the preview names it in a batch.
+        (suggestion.contexts || []).forEach(function (context) {
+          if (merged.contexts.length < PREVIEW_CONTEXTS) {
+            merged.contexts.push({ before: context.before, match: context.match,
+                                   after: context.after, file: entry.file.name });
+          }
+        });
       });
     });
     // Same order as app/suggestions.py: likely names and IDs, then frequency, then A-Z.
@@ -1683,6 +1695,7 @@
   }
 
   function renderSuggestions(data) {
+    hidePreview();
     var box = $("doc-suggestions");
     box.innerHTML = "";
     var shown = data.suggestions.length;
@@ -1710,6 +1723,10 @@
         chip.classList.toggle("is-checked", tick.checked);
         updateSuggestButton();
       });
+      chip.addEventListener("mouseenter", function () { showPreview(chip, suggestion); });
+      chip.addEventListener("mouseleave", hidePreview);
+      tick.addEventListener("focus", function () { showPreview(chip, suggestion); });
+      tick.addEventListener("blur", hidePreview);
       var word = document.createElement("span");
       word.textContent = suggestion.term;
       chip.appendChild(tick);
@@ -1736,6 +1753,62 @@
     select.value = entities.indexOf(previous) !== -1 ? previous
       : entities.indexOf("PERSON") !== -1 ? "PERSON" : entities[0];
     updateSuggestButton();
+  }
+
+  /* The hover preview: where a suggested word sits, as "…before WORD after…". The text is
+     from the redacted files, so anything already redacted reads as its token. Built from
+     text nodes only -- it is the user's file content. */
+  function showPreview(chip, suggestion) {
+    var contexts = suggestion.contexts || [];
+    if (!contexts.length) { return; }
+    var box = $("suggest-preview");
+    box.innerHTML = "";
+    var showFile = docState.files.length > 1;
+
+    contexts.forEach(function (context) {
+      var line = document.createElement("div");
+      line.className = "preview-line";
+      if (showFile && context.file) {
+        var file = document.createElement("span");
+        file.className = "preview-file";
+        file.textContent = context.file;
+        line.appendChild(file);
+      }
+      var text = document.createElement("span");
+      text.className = "preview-text";
+      text.appendChild(document.createTextNode(context.before));
+      var word = document.createElement("mark");
+      word.textContent = context.match;
+      text.appendChild(word);
+      text.appendChild(document.createTextNode(context.after));
+      line.appendChild(text);
+      box.appendChild(line);
+    });
+    if (suggestion.count > contexts.length) {
+      var more = document.createElement("div");
+      more.className = "preview-more";
+      more.textContent = "+ " + (suggestion.count - contexts.length) + " more";
+      box.appendChild(more);
+    }
+
+    box.hidden = false;
+    chip.setAttribute("aria-describedby", "suggest-preview");
+    // Below the chip, or above it when there is no room; kept inside the viewport.
+    var rect = chip.getBoundingClientRect();
+    var width = box.offsetWidth;
+    var height = box.offsetHeight;
+    var left = Math.min(Math.max(8, rect.left), window.innerWidth - width - 8);
+    var top = rect.bottom + 6;
+    if (top + height > window.innerHeight - 8) { top = Math.max(8, rect.top - height - 6); }
+    box.style.left = left + "px";
+    box.style.top = top + "px";
+  }
+
+  function hidePreview() {
+    $("suggest-preview").hidden = true;
+    document.querySelectorAll('[aria-describedby="suggest-preview"]').forEach(function (el) {
+      el.removeAttribute("aria-describedby");
+    });
   }
 
   function selectedSuggestions() {
@@ -2003,6 +2076,9 @@
     });
 
     $("suggest-filter").addEventListener("input", filterSuggestions);
+    // The preview is fixed to the viewport; scrolling would leave it behind its chip.
+    $("doc-suggestions").addEventListener("scroll", hidePreview);
+    window.addEventListener("scroll", hidePreview, true);
     $("suggest-custom").addEventListener("input", updateSuggestButton);
     $("suggest-custom").addEventListener("keydown", function (event) {
       if (event.key === "Enter") { event.preventDefault(); redactSuggestions(); }
