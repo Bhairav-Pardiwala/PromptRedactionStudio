@@ -2215,8 +2215,43 @@
     });
   }
 
+  /* --- options pane on phones ------------------------------------------------ */
+  /* In the single-column layout the options come before the prompt, so a phone starts
+     with them folded away. The collapse rule itself lives inside the narrow media query
+     in styles.css, so a wider window always shows the full pane whatever the class says.
+     Folding hides controls only; every option keeps applying. */
+
+  var OPTIONS_STORAGE = "prs.options-collapsed";
+
+  function initOptionsToggle() {
+    var narrow = window.matchMedia("(max-width: 860px)");
+    var pane = document.querySelector(".options");
+    var toggle = $("btn-options-toggle");
+    var collapsed = true;
+    try {
+      var saved = window.sessionStorage.getItem(OPTIONS_STORAGE);
+      if (saved !== null) { collapsed = saved === "1"; }
+    } catch (err) { /* start collapsed */ }
+
+    function sync() {
+      pane.classList.toggle("is-collapsed", collapsed);
+      toggle.setAttribute("aria-expanded", String(!(collapsed && narrow.matches)));
+    }
+
+    toggle.addEventListener("click", function () {
+      if (!narrow.matches) { return; }
+      collapsed = !collapsed;
+      try { window.sessionStorage.setItem(OPTIONS_STORAGE, collapsed ? "1" : "0"); }
+      catch (err) { /* not remembered */ }
+      sync();
+    });
+    if (narrow.addEventListener) { narrow.addEventListener("change", sync); }
+    sync();
+  }
+
   /* --- boot ----------------------------------------------------------------- */
 
+  initOptionsToggle();
   state.apiKey = readStoredKey();
 
   api("/api/config").then(function (config) {
