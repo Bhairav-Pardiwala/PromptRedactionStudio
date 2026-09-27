@@ -5,7 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Prompt Redaction Studio</title>
 <link rel="stylesheet" href="/static/styles.css">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛡️</text></svg>">
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<!-- Installable, deliberately without a service worker: nothing is ever cached, so no
+     prompt or API response can land in Cache Storage. -->
+<link rel="manifest" href="/static/manifest.json">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#171b21" media="(prefers-color-scheme: dark)">
 </head>
 <body>
 
@@ -27,6 +33,15 @@
       <button type="button" id="btn-auth-save" class="btn btn-ghost btn-tiny">Unlock</button>
     </span>
     <span id="engine-status" class="pill pill-muted">Loading&hellip;</span>
+    <!-- Shown only where the page can be installed: the browser's own prompt, or on iOS
+         Safari, which has no install API, instructions instead. See initInstall(). -->
+    <span class="install">
+      <button type="button" id="btn-install" class="btn btn-ghost" hidden
+              aria-controls="install-hint" aria-expanded="false">Install app</button>
+      <span id="install-hint" class="install-hint" role="note" hidden>
+        Tap <strong>Share</strong>, then <strong>Add to Home Screen</strong>.
+      </span>
+    </span>
     <button type="button" id="btn-sample" class="btn btn-ghost">Load sample prompt</button>
   </div>
 </header>
