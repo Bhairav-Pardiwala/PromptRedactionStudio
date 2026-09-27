@@ -1,0 +1,6 @@
+# The sample documents are test inputs: keep their bytes exactly as generated. Without
+# this, core.autocrlf rewrites line endings inside the PDFs (breaking their byte offsets)
+# and normalises the CRLF in the CSV and the Windows-1252 notes.
+samples/documents/* -text
+samples/documents/README.md text
+samples/documents/make_samples.py text
