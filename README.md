@@ -17,6 +17,7 @@ application, via a hotkey.
 
 📖 **[Full guide](docs/GUIDE.md)** — every option explained, API reference, how the
 restore round trip works. ⚙️ **[Administrator guide](docs/ADMIN.md)** — deploying it to a team.
+🤖 **[Guide for AI assistants](docs/LLM-GUIDE.md)** — installing and driving it on someone's behalf.
 
 > All names, cards and IDs in the sample prompt, tests and screenshots are **synthetic**.
 > No real personal data is in this repository.

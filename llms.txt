@@ -1,0 +1,29 @@
+# Prompt Redaction Studio
+
+> A local FastAPI app and JSON API that finds personal data (PII) in text and documents with Microsoft Presidio, replaces each value with a reversible token such as <PERSON_1>, and restores the real values in an LLM's reply afterwards. It runs entirely on the user's machine: it never calls an LLM, makes no network requests at runtime, and keeps token mappings in memory only. It ships with a browser UI and an optional desktop tray app for the clipboard.
+
+AI assistants installing or using this for someone should read the LLM guide first. It covers non-interactive install commands (always pass `-NoTray -NoBrowser` / `--no-tray --no-browser`), health checks, and copy-paste API calls. Default address: http://127.0.0.1:8000 (use 127.0.0.1, not localhost). Python 3.10–3.14 or Docker is required.
+
+## Docs
+
+- [Guide for AI assistants](https://github.com/Bhairav-Pardiwala/PromptRedactionStudio/blob/main/docs/LLM-GUIDE.md): install paths, non-interactive launch, verification, API usage, troubleshooting, and the rules for handling the user's PII
+- [README](https://github.com/Bhairav-Pardiwala/PromptRedactionStudio/blob/main/README.md): overview, one-step launchers, Docker, a sample API round trip
+- [Full guide](https://github.com/Bhairav-Pardiwala/PromptRedactionStudio/blob/main/docs/GUIDE.md): every option, the operators, the restore round trip, documents, the API reference
+- [Administrator guide](https://github.com/Bhairav-Pardiwala/PromptRedactionStudio/blob/main/docs/ADMIN.md): team deployment, API keys, SSO behind a reverse proxy, central policy, tray client rollout
+
+## API
+
+- `GET /api/health`: liveness; `loaded_engines` is empty until the first request, which is normal
+- `GET /api/config`: engine availability, entity types, operators, `auth_required`
+- `POST /api/analyze`: detections only
+- `POST /api/redact`: `{"text": ...}` returns `redacted_text`, `mapping` and `session_id`
+- `POST /api/restore`: `{"text": reply, "session_id": ...}` returns `restored_text` and `not_found`
+- `POST /api/documents/redact`: `{"filename", "content_base64"}` for .docx .xlsx .pdf .txt .md .csv (max 10 MB)
+- `POST /api/documents/restore`: `{"filename", "content_base64", "session_id"}`
+- `DELETE /api/sessions/{id}`: forget one mapping now
+- Docker: `docker run -d --rm -p 127.0.0.1:8000:8000 bhairavpardiwala/prompt-redaction-studio`
+
+## Optional
+
+- [AGENTS.md](https://github.com/Bhairav-Pardiwala/PromptRedactionStudio/blob/main/AGENTS.md): layout, tests and privacy invariants, for agents that will change the code
+- [Source](https://github.com/Bhairav-Pardiwala/PromptRedactionStudio): the repository
