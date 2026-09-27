@@ -1307,7 +1307,7 @@
   function formatBytes(bytes) {
     if (bytes < 1024) { return bytes + " B"; }
     if (bytes < 1024 * 1024) { return Math.round(bytes / 1024) + " KB"; }
-    return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+    return (bytes / (1024 * 1024)).toFixed(1).replace(/\.0$/, "") + " MB";
   }
 
   function extensionOf(name) {
@@ -1562,7 +1562,24 @@
   }
 
   function initDocuments(config) {
-    var types = config.document_types || [];
+    $("tab-text").addEventListener("click", function () { setMode("text"); });
+    $("tab-doc").addEventListener("click", function () { setMode("doc"); });
+
+    // The page is static and always current, but the server may be an older process
+    // (started before document support, without --reload). Say so, rather than showing
+    // "up to NaN MB" and refusing every file as unsupported.
+    if (!config.document_types || !config.max_document_bytes) {
+      $("doc-drop").hidden = true;
+      $("doc-status").textContent = "Unavailable";
+      var note = document.createElement("p");
+      note.className = "hint warn";
+      note.textContent = "This server does not support documents yet. It is probably still "
+        + "running an older version: restart it and reload this page.";
+      $("doc-drop").parentNode.insertBefore(note, $("doc-drop"));
+      return;
+    }
+
+    var types = config.document_types;
     $("doc-types").textContent = types.join(" ") + " · up to " + formatBytes(config.max_document_bytes);
     $("doc-file").accept = types.join(",");
     $("doc-restore-file").accept = types.concat([".txt"]).join(",");
@@ -1579,8 +1596,6 @@
       });
     });
 
-    $("tab-text").addEventListener("click", function () { setMode("text"); });
-    $("tab-doc").addEventListener("click", function () { setMode("doc"); });
     $("btn-doc-remove").addEventListener("click", removeDocument);
     $("btn-doc-redact").addEventListener("click", redactDocument);
     $("btn-doc-again").addEventListener("click", redactDocument);
