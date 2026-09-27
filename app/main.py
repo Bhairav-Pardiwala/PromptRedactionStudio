@@ -5,6 +5,8 @@ Serves both the JSON API and the static single-page frontend from one process.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
 import os
 import secrets
@@ -16,7 +18,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from presidio_anonymizer.entities import InvalidParamError
 
-from . import engines, operators, policy, recognizers, redaction, schemas
+from . import documents, engines, operators, policy, recognizers, redaction, schemas
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("prompt_redaction")
@@ -281,6 +283,8 @@ def get_config() -> Dict[str, Any]:
         "operators": operators.OPERATOR_SPECS,
         "default_operator": operators.PLACEHOLDER,
         "sample_prompt": SAMPLE_PROMPT,
+        "document_types": documents.DOCUMENT_TYPES,
+        "max_document_bytes": documents.MAX_DOCUMENT_BYTES,
         "error": error,
         # Whether a key is needed, never the key itself. The frontend renders its unlock
         # field from this, which is why this one route stays open: the UI has to be able
@@ -320,26 +324,29 @@ def post_analyze(request: schemas.AnalyzeRequest) -> Dict[str, Any]:
     return {"findings": findings, "count": len(findings), "engine": request.engine}
 
 
-@app.post("/api/redact", response_model=schemas.RedactResponse, dependencies=[Depends(require_api_key)])
-def post_redact(request: schemas.RedactRequest) -> Dict[str, Any]:
+def _redact_options(request: schemas.RedactRequest) -> Dict[str, Any]:
+    """Every option a redaction takes, shared by the text and document routes."""
+    return {
+        "default_operator": request.default_operator.model_dump(),
+        "per_entity_operators": {
+            entity: spec.model_dump() for entity, spec in request.per_entity_operators.items()
+        },
+        "engine": request.engine,
+        "language": request.language,
+        "entities": request.entities,
+        "score_threshold": request.score_threshold,
+        "allow_list": request.allow_list,
+        "allow_list_match": request.allow_list_match,
+        "custom_recognizers": [r.model_dump() for r in request.custom_recognizers],
+        "detect_organization": request.detect_organization,
+        "return_explanations": request.return_explanations,
+        "store_session": request.store_session,
+    }
+
+
+def _run_redaction(redact: Any, *args: Any, **kwargs: Any) -> Dict[str, Any]:
     try:
-        result = redaction.redact(
-            text=request.text,
-            default_operator=request.default_operator.model_dump(),
-            per_entity_operators={
-                entity: spec.model_dump() for entity, spec in request.per_entity_operators.items()
-            },
-            engine=request.engine,
-            language=request.language,
-            entities=request.entities,
-            score_threshold=request.score_threshold,
-            allow_list=request.allow_list,
-            allow_list_match=request.allow_list_match,
-            custom_recognizers=[r.model_dump() for r in request.custom_recognizers],
-            detect_organization=request.detect_organization,
-            return_explanations=request.return_explanations,
-            store_session=request.store_session,
-        )
+        return redact(*args, **kwargs)
     except engines.EngineUnavailable as exc:
         raise _http_error(exc, 503)
     except (
@@ -350,7 +357,103 @@ def post_redact(request: schemas.RedactRequest) -> Dict[str, Any]:
     ) as exc:
         raise _http_error(exc)
 
+
+@app.post("/api/redact", response_model=schemas.RedactResponse, dependencies=[Depends(require_api_key)])
+def post_redact(request: schemas.RedactRequest) -> Dict[str, Any]:
+    result = _run_redaction(redaction.redact, text=request.text, **_redact_options(request))
     result["engine"] = request.engine
+    return result
+
+
+def _open_upload(filename: str, content_base64: str) -> documents.Document:
+    # Checked before decoding, so an oversized upload is refused without being inflated.
+    if len(content_base64) > (documents.MAX_DOCUMENT_BYTES * 4) // 3 + 4:
+        raise _http_error(
+            documents.DocumentError(
+                "That file is too large. The limit is "
+                + str(documents.MAX_DOCUMENT_BYTES // (1024 * 1024))
+                + " MB."
+            )
+        )
+    try:
+        data = base64.b64decode(content_base64, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=400, detail="The file content is not valid base64.")
+    try:
+        return documents.open_document(filename, data)
+    except documents.DocumentError as exc:
+        raise _http_error(exc)
+
+
+@app.post(
+    "/api/documents/redact",
+    response_model=schemas.DocumentRedactResponse,
+    dependencies=[Depends(require_api_key)],
+)
+def post_document_redact(request: schemas.DocumentRedactRequest) -> Dict[str, Any]:
+    """Redact a whole file with one consistent set of tokens, and hand back the copy.
+
+    The same session id works for /api/restore, so an LLM's reply about the document
+    restores exactly as a reply about a prompt does.
+    """
+    document = _open_upload(request.filename, request.content_base64)
+    result = _run_redaction(
+        redaction.redact_segments, document.segments, **_redact_options(request)
+    )
+    try:
+        content = document.rebuild(result["segments"])
+    except documents.DocumentError as exc:
+        raise _http_error(exc)
+
+    changed = [
+        {"label": document.labels[i], "text": new}
+        for i, (old, new) in enumerate(zip(document.segments, result["segments"]))
+        if old != new
+    ]
+    for finding in result["findings"]:
+        finding["location"] = document.labels[finding.pop("segment")]
+
+    return {
+        "session_id": result["session_id"],
+        "filename": documents.output_name(request.filename, "redacted", document.output_suffix),
+        "media_type": document.media_type,
+        "content_base64": base64.b64encode(content).decode("ascii"),
+        "findings": result["findings"],
+        "items": result["items"],
+        "mapping": result["mapping"],
+        "operators_applied": result["operators_applied"],
+        "reversible": result["reversible"],
+        "engine": request.engine,
+        "segments": changed,
+        "segments_changed": len(changed),
+        "warnings": document.warnings,
+    }
+
+
+@app.post(
+    "/api/documents/restore",
+    response_model=schemas.DocumentRestoreResponse,
+    dependencies=[Depends(require_api_key)],
+)
+def post_document_restore(request: schemas.DocumentRestoreRequest) -> Dict[str, Any]:
+    """Put the real values back into a redacted file -- or one an LLM edited and returned."""
+    document = _open_upload(request.filename, request.content_base64)
+    try:
+        result = redaction.restore_segments(document.segments, request.session_id)
+        content = document.rebuild(result.pop("segments"))
+    except (redaction.RedactionError, documents.DocumentError) as exc:
+        raise _http_error(exc)
+
+    result.update(
+        {
+            "filename": documents.output_name(
+                request.filename, "restored", document.output_suffix
+            ),
+            "media_type": document.media_type,
+            "content_base64": base64.b64encode(content).decode("ascii"),
+            "warnings": document.warnings,
+        }
+    )
     return result
 
 

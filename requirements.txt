@@ -1,5 +1,8 @@
 presidio-analyzer==2.2.364
 presidio-anonymizer==2.2.364
+# Document redaction: Office files are edited as XML (lxml), PDFs read as text (pypdf).
+lxml>=5.2,<7
+pypdf>=5,<7
 fastapi>=0.115
 uvicorn[standard]>=0.30
 pydantic>=2.12.5

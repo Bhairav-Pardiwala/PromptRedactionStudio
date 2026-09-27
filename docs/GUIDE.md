@@ -134,6 +134,42 @@ your prompt anywhere — Presidio runs locally, and no LLM is called.
 
 ---
 
+## Documents
+
+The **Document** tab redacts a whole file with the same options as a prompt. Drop in a
+file, click **Redact document**, check the preview, and download the redacted copy. Give that
+copy to a model. Paste the model's reply into the restore box to get the real values back.
+If the model edited the file and handed it back, drop that file into the restore area
+instead.
+
+| Type | What is redacted | You get back |
+|---|---|---|
+| `.docx` | body, tables, text boxes, headers, footers, footnotes, comments, hyperlink addresses, field codes, title and subject | a `.docx` |
+| `.xlsx` | text cells, rich text, long numbers typed as numbers (card and phone numbers), cached formula results, comments | a `.xlsx` |
+| `.pdf` | the text of every page | a `.txt` — layout is not kept |
+| `.txt` `.md` `.csv` | every line | the same type, same encoding |
+
+The whole file is redacted as one piece, so `<PERSON_1>` is the same person in a header, a
+table cell and a comment. Detection runs on each paragraph, cell or line separately, so a
+name at the end of one cell is never merged with the start of the next.
+
+The file is also cleaned in ways you would not see in Word or Excel:
+- The author, last editor, company and manager fields are blanked.
+- Comment and revision authors are blanked.
+- Tracked deletions are removed, because the deleted text is still inside the file.
+
+Anything that was not checked is listed as a warning, not skipped silently: images, charts,
+embedded objects, pivot-table caches, and linked-workbook caches.
+
+A paragraph that changes keeps its style and its first run's formatting. Mixed formatting
+inside it, such as a bold word, is merged into that first run. Untouched paragraphs, and
+every part of the file that did not change, are copied through byte for byte.
+
+The limit is 10 MB per file. The file is held in memory only and is never written to disk,
+on either the server or the browser.
+
+---
+
 ## Desktop app deployment
 
 The web UI is fine for exploring options, but copy-pasting into a browser tab before every
@@ -315,6 +351,8 @@ Interactive docs at `http://localhost:8000/docs` on instances with no API key se
 | `POST /api/analyze` | detections only — type, offsets, score, explanation |
 | `POST /api/redact` | analyze + anonymize — redacted text, token map, session id |
 | `POST /api/restore` | put real values back into text containing tokens |
+| `POST /api/documents/redact` | redact a whole file — DOCX, XLSX, PDF, TXT, MD, CSV — and get the copy back |
+| `POST /api/documents/restore` | put real values back into a redacted (or LLM-edited) file |
 | `DELETE /api/sessions/{id}` | drop one mapping — what a client clearing its own redaction wants |
 | `POST /api/sessions/clear` | drop **every** stored mapping, for every client (admin key) |
 | `GET /api/health` | liveness, which engines are warm |
@@ -330,6 +368,13 @@ Findings come back with `entity_type`, `start`, `end`, `score`, `text`, the `rec
 that fired, and an `explanation` when you asked for one. Restore responses carry
 `restored_text`, `tokens_restored` / `tokens_total`, a per-token `restored_counts`, and
 `not_found` for tokens the model never repeated.
+
+The document routes take the file as `content_base64` next to `filename`, whose extension
+picks the format. `POST /api/documents/redact` accepts every option `/api/redact` does,
+and returns the redacted file as `content_base64`, a `filename` for it, `findings` with a
+`location` each, the token `mapping`, the changed `segments` for a preview, and
+`warnings`. Its `session_id` works with `/api/restore` as well, for a reply about the
+document. See [Documents](#documents).
 
 A worked round trip with real request and response bodies is in the
 [README](../README.md#sample-run).
@@ -351,6 +396,7 @@ app/
   operators.py    UI operator specs -> Presidio OperatorConfig; placeholder allocator
   recognizers.py  ad-hoc regex / deny-list recognizers
   redaction.py    analyze -> anonymize -> restore, plus the TTL session store
+  documents.py    DOCX / XLSX / PDF / text in and out, as labelled text segments
   policy.py       central IT-defined redaction policy, from REDACTION_POLICY_FILE
   schemas.py      pydantic request/response models
   static/         index.html, styles.css, app.js  (no build step)
@@ -359,6 +405,7 @@ tray/             Avalonia desktop client
   Services/       RedactionClient, MappingStore, HotkeyService, ClipboardService
   Views/          SettingsWindow, ToastWindow
 tests/test_api.py 38 tests over the API
+tests/test_documents.py  document redaction, over the API, on synthetic files
 tray.Tests/       25 tests over the client logic
 ```
 
@@ -372,7 +419,7 @@ entity types.
 ## Tests
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests\ -v     # 68 backend tests
+.\.venv\Scripts\python.exe -m pytest tests\ -v     # 91 backend tests
 dotnet test tray.Tests                             # 25 desktop client tests
 ```
 

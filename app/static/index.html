@@ -113,6 +113,12 @@
 
   <!-- ----------------------------------------------------------------- prompt -->
   <section class="panel prompt" aria-label="Prompt">
+    <div class="tabs" role="tablist" aria-label="What to redact">
+      <button type="button" class="tab" role="tab" id="tab-text" aria-controls="pane-text" aria-selected="true">Text</button>
+      <button type="button" class="tab" role="tab" id="tab-doc" aria-controls="pane-doc" aria-selected="false">Document</button>
+    </div>
+
+    <div id="pane-text" role="tabpanel" aria-labelledby="tab-text">
     <div class="panel-head">
       <h2 class="panel-title">Your prompt</h2>
       <div class="row-actions">
@@ -138,6 +144,46 @@
     <textarea id="redacted" class="output" rows="8" readonly
       placeholder="The redacted version appears here, safe to paste into any model."></textarea>
     <p class="hint" id="redact-summary"></p>
+    </div>
+
+    <!-- Document mode. Built on the same options panel; the file is held in memory only. -->
+    <div id="pane-doc" role="tabpanel" aria-labelledby="tab-doc" hidden>
+      <div class="panel-head">
+        <h2 class="panel-title">Your document</h2>
+        <span id="doc-status" class="pill pill-muted">No file</span>
+      </div>
+
+      <label class="dropzone" id="doc-drop">
+        <input type="file" id="doc-file" hidden>
+        <span class="dropzone-icon" aria-hidden="true">&#128196;</span>
+        <span class="dropzone-main">Drop a file or <u>browse</u></span>
+        <span class="dropzone-sub" id="doc-types"></span>
+      </label>
+
+      <div class="file-card" id="doc-card" hidden>
+        <span class="file-card-icon" aria-hidden="true">&#128196;</span>
+        <span class="file-card-name" id="doc-name"></span>
+        <span class="file-card-size" id="doc-size"></span>
+        <button type="button" class="btn btn-ghost btn-tiny" id="btn-doc-remove" aria-label="Remove file">&times;</button>
+        <button type="button" class="btn btn-primary" id="btn-doc-redact">Redact document</button>
+      </div>
+
+      <div id="doc-result" hidden>
+        <div class="doc-summary">
+          <span id="doc-summary"></span>
+          <div class="row-actions">
+            <button type="button" class="btn btn-primary" id="btn-doc-download"></button>
+            <button type="button" class="btn btn-ghost btn-tiny" id="btn-doc-again">Redact again</button>
+          </div>
+        </div>
+        <div id="doc-warnings"></div>
+
+        <div class="panel-head">
+          <h2 class="panel-title">Preview <span class="counter">changed parts only</span></h2>
+        </div>
+        <div class="segment-list" id="doc-preview"></div>
+      </div>
+    </div>
 
     <div class="panel-head">
       <h2 class="panel-title">Restore the reply</h2>
@@ -151,6 +197,14 @@
     <textarea id="restored" class="output" rows="5" readonly
       placeholder="The response with real values reinstated appears here."></textarea>
     <p class="hint" id="restore-summary"></p>
+
+    <div class="doc-restore" id="doc-restore" hidden>
+      <span class="hint">&hellip;or drop the edited file back to get a copy with the real values.</span>
+      <label class="dropzone dropzone-small" id="doc-restore-drop">
+        <input type="file" id="doc-restore-file" hidden>
+        <span class="dropzone-main">&#128196; Drop a redacted file or <u>browse</u></span>
+      </label>
+    </div>
   </section>
 
   <!-- --------------------------------------------------------------- findings -->
@@ -167,6 +221,7 @@
           <tr>
             <th data-sort="entity_type">Entity</th>
             <th data-sort="text">Text</th>
+            <th data-sort="location" id="findings-where" hidden>Where</th>
             <th data-sort="score">Score</th>
           </tr>
         </thead>

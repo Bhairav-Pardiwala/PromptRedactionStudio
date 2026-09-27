@@ -14,6 +14,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from presidio_analyzer import BatchAnalyzerEngine
 from presidio_anonymizer import AnonymizerEngine, DeanonymizeEngine
 from presidio_anonymizer.entities import OperatorConfig, OperatorResult
 
@@ -22,6 +23,14 @@ from . import engines, operators, recognizers
 SESSION_TTL_SECONDS = 60 * 60  # one hour
 MAX_SESSIONS = 200
 MAX_TEXT_CHARS = 100_000
+# A document is redacted as one joined text so tokens stay consistent across it, which
+# makes it longer than any prompt. Still bounded, because detection time grows with it.
+MAX_DOCUMENT_CHARS = 500_000
+
+# Joins a document's segments into one text for a single analyze pass. The unit
+# separator cannot come from a real document (it is stripped from every segment first),
+# so splitting on it afterwards gives back exactly the segments that went in.
+SEGMENT_SEP = "\n\x1f\n"
 
 _anonymizer = AnonymizerEngine()
 _deanonymizer = DeanonymizeEngine()
@@ -96,15 +105,15 @@ class SessionStore:
 store = SessionStore()
 
 
-def _validate_text(text: str) -> str:
+def _validate_text(text: str, max_chars: int = MAX_TEXT_CHARS) -> str:
     if text is None:
         raise RedactionError("No text supplied.")
-    if len(text) > MAX_TEXT_CHARS:
+    if len(text) > max_chars:
         raise RedactionError(
             "Text is too long ("
             + str(len(text))
             + " characters). The limit is "
-            + str(MAX_TEXT_CHARS)
+            + str(max_chars)
             + "."
         )
     return text
@@ -138,9 +147,37 @@ def analyze(
     custom_recognizers: Optional[List[Dict[str, Any]]] = None,
     detect_organization: bool = False,
     return_explanations: bool = False,
+    max_chars: int = MAX_TEXT_CHARS,
 ) -> Tuple[List[Dict[str, Any]], List[Any]]:
     """Run Presidio detection and return both JSON-ready findings and the raw results."""
-    text = _validate_text(text)
+    text = _validate_text(text, max_chars)
+    return _analyze_texts(
+        [text],
+        engine=engine,
+        language=language,
+        entities=entities,
+        score_threshold=score_threshold,
+        allow_list=allow_list,
+        allow_list_match=allow_list_match,
+        custom_recognizers=custom_recognizers,
+        detect_organization=detect_organization,
+        return_explanations=return_explanations,
+    )[0]
+
+
+def _analyze_texts(
+    texts: List[str],
+    engine: str = engines.DEFAULT_ENGINE,
+    language: str = "en",
+    entities: Optional[List[str]] = None,
+    score_threshold: Optional[float] = None,
+    allow_list: Optional[List[str]] = None,
+    allow_list_match: str = "exact",
+    custom_recognizers: Optional[List[Dict[str, Any]]] = None,
+    detect_organization: bool = False,
+    return_explanations: bool = False,
+) -> List[Tuple[List[Dict[str, Any]], List[Any]]]:
+    """Detect in each text independently. Several texts go through spaCy as one batch."""
     analyzer = engines.get_analyzer(engine, detect_organization)
     ad_hoc = recognizers.build_ad_hoc_recognizers(custom_recognizers or [], language)
 
@@ -152,10 +189,9 @@ def analyze(
             if entity_type not in requested:
                 requested.append(entity_type)
         if not requested:
-            return [], []
+            return [([], []) for _ in texts]
 
-    results = analyzer.analyze(
-        text=text,
+    options = dict(
         language=language,
         entities=requested,
         score_threshold=score_threshold,
@@ -164,8 +200,22 @@ def analyze(
         ad_hoc_recognizers=ad_hoc or None,
         return_decision_process=return_explanations,
     )
+    if len(texts) == 1:
+        batches = [analyzer.analyze(text=texts[0], **options)]
+    else:
+        language_option = options.pop("language")
+        batches = BatchAnalyzerEngine(analyzer_engine=analyzer).analyze_iterator(
+            texts, language_option, batch_size=32, **options
+        )
 
-    findings = [
+    return [
+        (_to_findings(text, results, return_explanations), results)
+        for text, results in zip(texts, batches)
+    ]
+
+
+def _to_findings(text: str, results: List[Any], return_explanations: bool) -> List[Dict[str, Any]]:
+    return [
         {
             "entity_type": result.entity_type,
             "start": result.start,
@@ -179,7 +229,6 @@ def analyze(
         }
         for result in sorted(results, key=lambda r: (r.start, -r.score))
     ]
-    return findings, results
 
 
 def redact(
@@ -198,7 +247,20 @@ def redact(
     server remembering.
     """
     findings, results = analyze(text, **analyze_kwargs)
+    return _anonymize(
+        text, findings, results, default_operator, per_entity_operators, store_session
+    )
 
+
+def _anonymize(
+    text: str,
+    findings: List[Dict[str, Any]],
+    results: List[Any],
+    default_operator: Optional[Dict[str, Any]],
+    per_entity_operators: Optional[Dict[str, Dict[str, Any]]],
+    store_session: bool,
+) -> Dict[str, Any]:
+    """Everything after detection: allocate tokens, rewrite, and optionally store."""
     detected_types = []
     for finding in findings:
         if finding["entity_type"] not in detected_types:
@@ -271,7 +333,73 @@ def redact(
     }
 
 
-def restore(text: str, session_id: str) -> Dict[str, Any]:
+def redact_segments(
+    segments: List[str],
+    default_operator: Optional[Dict[str, Any]] = None,
+    per_entity_operators: Optional[Dict[str, Dict[str, Any]]] = None,
+    store_session: bool = True,
+    **analyze_kwargs: Any,
+) -> Dict[str, Any]:
+    """Redact a document's text segments in one pass, so tokens are consistent across it.
+
+    Redacting each paragraph or cell on its own would restart <PERSON_1> in every one of
+    them. So detection runs per segment -- a model must not read one cell's name into the
+    next cell's text, and it will across any separator -- while token allocation and
+    rewriting run once, over all segments joined, so one person gets one token throughout.
+
+    Findings come back with offsets into their own segment and a `segment` index.
+    """
+    clean = [segment.replace("\x1f", "") for segment in segments]
+    joined = _validate_text(SEGMENT_SEP.join(clean), MAX_DOCUMENT_CHARS)
+
+    # Blank segments (empty lines, spacer cells) cannot hold PII; skip the model for them.
+    to_scan = [i for i, segment in enumerate(clean) if segment.strip()]
+    per_segment = _analyze_texts([clean[i] for i in to_scan], **analyze_kwargs) if to_scan else []
+
+    findings: List[Dict[str, Any]] = []
+    results: List[Any] = []
+    offsets = []
+    cursor = 0
+    for segment in clean:
+        offsets.append(cursor)
+        cursor += len(segment) + len(SEGMENT_SEP)
+    for index, (segment_findings, segment_results) in zip(to_scan, per_segment):
+        for finding in segment_findings:
+            findings.append(dict(finding, segment=index))
+        for result in segment_results:
+            # Move each span into the joined text, where anonymization happens.
+            result.start += offsets[index]
+            result.end += offsets[index]
+            results.append(result)
+
+    result = _anonymize(
+        joined, findings, results, default_operator, per_entity_operators, store_session
+    )
+    redacted_segments = result.pop("redacted_text").split(SEGMENT_SEP)
+    if len(redacted_segments) != len(clean):  # pragma: no cover - spans never cross a separator
+        raise RedactionError("The document could not be split back into its parts.")
+
+    del result["original_text"]
+    # Offsets into the joined text mean nothing to a caller holding separate segments.
+    for item in result["items"]:
+        item.pop("start", None)
+        item.pop("end", None)
+    result["segments"] = redacted_segments
+    return result
+
+
+def restore_segments(segments: List[str], session_id: str) -> Dict[str, Any]:
+    """Restore every segment of a document against one session, counting once."""
+    clean = [segment.replace("\x1f", "") for segment in segments]
+    result = restore(SEGMENT_SEP.join(clean), session_id, max_chars=MAX_DOCUMENT_CHARS)
+    restored = result.pop("restored_text").split(SEGMENT_SEP)
+    if len(restored) != len(clean):  # pragma: no cover - originals never contain \x1f
+        raise RedactionError("The document could not be split back into its parts.")
+    result["segments"] = restored
+    return result
+
+
+def restore(text: str, session_id: str, max_chars: int = MAX_TEXT_CHARS) -> Dict[str, Any]:
     """Put the real values back into text that contains redaction tokens.
 
     Presidio's DeanonymizeEngine needs OperatorResult offsets that match the text being
@@ -280,7 +408,7 @@ def restore(text: str, session_id: str) -> Dict[str, Any]:
     So each token is located in the incoming text first and the spans are rebuilt at
     those offsets before handing off to Presidio.
     """
-    text = _validate_text(text)
+    text = _validate_text(text, max_chars)
     session = store.get(session_id)
 
     restored_counts: Dict[str, int] = {}

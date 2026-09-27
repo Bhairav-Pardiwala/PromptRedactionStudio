@@ -18,7 +18,9 @@
     perEntity: {},          // entity type -> {type, params}
     entities: null,         // Set of enabled entity types, or null for "all"
     recognizers: [],
-    sessionId: null,
+    sessionId: null,        // the text tab's session; the document tab keeps its own
+    textMapping: {},
+    mode: "text",           // "text" | "doc" -- which tab is showing
     apiKey: null,           // only ever set when the instance reports auth_required
     findings: [],
     sort: { key: "score", dir: -1 },
@@ -175,6 +177,8 @@
   }
 
   function analyze() {
+    // The document tab's findings come from its last redaction, not from the prompt.
+    if (state.mode === "doc") { return; }
     var text = $("prompt").value;
     if (!text.trim()) {
       state.findings = [];
@@ -288,6 +292,12 @@
 
       tr.appendChild(tdEntity);
       tr.appendChild(tdText);
+      if (state.mode === "doc") {
+        var tdWhere = document.createElement("td");
+        tdWhere.className = "where";
+        tdWhere.textContent = finding.location || "";
+        tr.appendChild(tdWhere);
+      }
       tr.appendChild(tdScore);
       tr.title = buildTooltip(finding);
       tbody.appendChild(tr);
@@ -325,6 +335,7 @@
 
     api("/api/redact", basePayload()).then(function (data) {
       state.sessionId = data.session_id;
+      state.textMapping = data.mapping;
       state.findings = data.findings;
       $("redacted").value = data.redacted_text;
       $("btn-copy").disabled = !data.redacted_text;
@@ -385,12 +396,14 @@
   /* --- restore -------------------------------------------------------------- */
 
   function restore() {
-    var text = $("reply").value.trim() || $("redacted").value;
+    var docMode = state.mode === "doc";
+    var sessionId = currentSessionId();
+    var text = $("reply").value.trim() || (docMode ? "" : $("redacted").value);
     if (!text) { toast("Paste the model's reply first.", true); return; }
-    if (!state.sessionId) { toast("Redact a prompt first.", true); return; }
+    if (!sessionId) { toast(docMode ? "Redact a document first." : "Redact a prompt first.", true); return; }
 
     $("btn-restore").disabled = true;
-    api("/api/restore", { text: text, session_id: state.sessionId }).then(function (data) {
+    api("/api/restore", { text: text, session_id: sessionId }).then(function (data) {
       $("restored").value = data.restored_text;
       var summary = data.tokens_restored + " of " + data.tokens_total + " tokens restored";
       if (data.not_found.length) {
@@ -1275,6 +1288,312 @@
     });
   }
 
+  /* --- documents ------------------------------------------------------------ */
+  /* A file is read into memory, sent as base64 with the same options a prompt gets, and
+     the redacted copy comes back as a download. Nothing about the file is kept in the
+     browser beyond this page's memory; sessionStorage holds only which tab was open.
+     The document has its own session, so the Restore box restores a reply about the
+     document while the Document tab is showing, and a reply about the prompt otherwise. */
+
+  var TAB_STORAGE = "prs.tab";
+  var docState = { file: null, base64: null, result: null, sessionId: null };
+  var TOKEN_RE = /<([A-Z][A-Z0-9_]*)_(\d+)>/g;
+  var PREVIEW_LIMIT = 200;
+
+  function currentSessionId() {
+    return state.mode === "doc" ? docState.sessionId : state.sessionId;
+  }
+
+  function formatBytes(bytes) {
+    if (bytes < 1024) { return bytes + " B"; }
+    if (bytes < 1024 * 1024) { return Math.round(bytes / 1024) + " KB"; }
+    return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  }
+
+  function extensionOf(name) {
+    var dot = name.lastIndexOf(".");
+    return dot === -1 ? "" : name.slice(dot).toLowerCase();
+  }
+
+  function setMode(mode) {
+    state.mode = mode;
+    var isDoc = mode === "doc";
+    $("tab-text").setAttribute("aria-selected", String(!isDoc));
+    $("tab-doc").setAttribute("aria-selected", String(isDoc));
+    $("pane-text").hidden = isDoc;
+    $("pane-doc").hidden = !isDoc;
+    $("doc-restore").hidden = !isDoc;
+    $("findings-where").hidden = !isDoc;
+    $("btn-restore").disabled = !currentSessionId();
+    $("reply").value = "";
+    $("restored").value = "";
+    $("restore-summary").textContent = "";
+    try { window.sessionStorage.setItem(TAB_STORAGE, mode); } catch (err) { /* not remembered */ }
+
+    if (isDoc) {
+      state.findings = docState.result ? docState.result.findings : [];
+      renderFindings(state.findings);
+      renderMapping(docState.result ? docState.result.mapping : {});
+    } else {
+      renderMapping(state.textMapping);
+      analyze();
+    }
+  }
+
+  function readAsBase64(file) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function () {
+        var url = String(reader.result);
+        resolve(url.slice(url.indexOf(",") + 1));   // strip "data:<type>;base64,"
+      };
+      reader.onerror = function () { reject(new Error("Could not read that file.")); };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  /* Refuse what the server would refuse, before reading a single byte. */
+  function checkFile(file) {
+    var types = state.config.document_types || [];
+    if (types.indexOf(extensionOf(file.name)) === -1) {
+      return "Unsupported file type. Supported: " + types.join(" ");
+    }
+    if (file.size > state.config.max_document_bytes) {
+      return "That file is too large. The limit is " + formatBytes(state.config.max_document_bytes) + ".";
+    }
+    return null;
+  }
+
+  function chooseDocument(file) {
+    if (!file) { return; }
+    var problem = checkFile(file);
+    if (problem) { toast(problem, true); return; }
+
+    readAsBase64(file).then(function (base64) {
+      docState.file = file;
+      docState.base64 = base64;
+      docState.result = null;
+      $("doc-name").textContent = file.name;
+      $("doc-size").textContent = formatBytes(file.size);
+      $("doc-drop").hidden = true;
+      $("doc-card").hidden = false;
+      $("doc-result").hidden = true;
+      status($("doc-status"), "Ready to redact", "muted");
+      state.findings = [];
+      renderFindings([]);
+      renderMapping({});
+    }).catch(function (err) { toast(err.message, true); });
+  }
+
+  function removeDocument() {
+    // The session stays: a reply about the document can still be restored.
+    docState.file = null;
+    docState.base64 = null;
+    docState.result = null;
+    $("doc-file").value = "";
+    $("doc-drop").hidden = false;
+    $("doc-card").hidden = true;
+    $("doc-result").hidden = true;
+    status($("doc-status"), "No file", "muted");
+    state.findings = [];
+    renderFindings([]);
+    renderMapping({});
+  }
+
+  function redactDocument() {
+    if (!docState.base64) { toast("Choose a file first.", true); return; }
+
+    var payload = basePayload();
+    delete payload.text;                 // the prompt has nothing to do with this request
+    payload.filename = docState.file.name;
+    payload.content_base64 = docState.base64;
+
+    status($("doc-status"), "Redacting…", "busy");
+    $("btn-doc-redact").disabled = true;
+    $("btn-doc-again").disabled = true;
+
+    api("/api/documents/redact", payload).then(function (data) {
+      docState.result = data;
+      docState.sessionId = data.session_id;
+      state.findings = data.findings;
+      renderFindings(data.findings);
+      renderMapping(data.mapping);
+      renderDocumentResult(data);
+      $("btn-restore").disabled = !data.session_id;
+
+      var count = data.items.length;
+      status($("doc-status"), count ? count + " redacted" : "No PII found", count ? "ok" : "muted");
+      toast(count ? "Redacted " + count + " item" + (count === 1 ? "" : "s") : "No PII detected");
+    }).catch(function (err) {
+      status($("doc-status"), "Error", "err");
+      toast(err.message, true);
+    }).finally(function () {
+      $("btn-doc-redact").disabled = false;
+      $("btn-doc-again").disabled = false;
+    });
+  }
+
+  function renderDocumentResult(data) {
+    var count = data.items.length;
+    var summary = count
+      ? "✓ " + count + " item" + (count === 1 ? "" : "s") + " redacted in "
+        + data.segments_changed + " place" + (data.segments_changed === 1 ? "" : "s")
+      : "Nothing detected — the file is unchanged.";
+    if (data.warnings.length) {
+      summary += " · " + data.warnings.length + " warning" + (data.warnings.length === 1 ? "" : "s");
+    }
+    $("doc-summary").textContent = summary;
+    $("btn-doc-download").textContent = "⬇ Download " + data.filename;
+
+    var warnings = $("doc-warnings");
+    warnings.innerHTML = "";
+    data.warnings.forEach(function (text) {
+      var p = document.createElement("p");
+      p.className = "hint warn";
+      p.textContent = "⚠ " + text;
+      warnings.appendChild(p);
+    });
+
+    var list = $("doc-preview");
+    list.innerHTML = "";
+    if (!data.segments.length) {
+      var empty = document.createElement("div");
+      empty.className = "empty";
+      empty.textContent = "Nothing in the file was changed.";
+      list.appendChild(empty);
+    }
+    data.segments.slice(0, PREVIEW_LIMIT).forEach(function (segment) {
+      var row = document.createElement("div");
+      row.className = "segment";
+      var label = document.createElement("span");
+      label.className = "segment-label";
+      label.textContent = segment.label;
+      var text = document.createElement("div");
+      text.className = "segment-text mono";
+      appendWithTokens(text, segment.text);
+      row.appendChild(label);
+      row.appendChild(text);
+      list.appendChild(row);
+    });
+    if (data.segments.length > PREVIEW_LIMIT) {
+      var more = document.createElement("p");
+      more.className = "hint";
+      more.textContent = "…and " + (data.segments.length - PREVIEW_LIMIT) + " more changed parts in the download.";
+      list.appendChild(more);
+    }
+    $("doc-result").hidden = false;
+  }
+
+  /* Text nodes plus a coloured tag per token -- never innerHTML, since this is file content. */
+  function appendWithTokens(container, text) {
+    var cursor = 0;
+    var match;
+    TOKEN_RE.lastIndex = 0;
+    while ((match = TOKEN_RE.exec(text)) !== null) {
+      container.appendChild(document.createTextNode(text.slice(cursor, match.index)));
+      var tag = document.createElement("span");
+      tag.className = "tag";
+      tag.setAttribute("style", entityStyle(match[1]));
+      tag.textContent = match[0];
+      container.appendChild(tag);
+      cursor = match.index + match[0].length;
+    }
+    container.appendChild(document.createTextNode(text.slice(cursor)));
+  }
+
+  function downloadBase64(base64, filename, mediaType) {
+    var binary = atob(base64);
+    var bytes = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i++) { bytes[i] = binary.charCodeAt(i); }
+    var url = URL.createObjectURL(new Blob([bytes], { type: mediaType }));
+    var link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    // Revoked once the browser has started the download, so the file does not linger.
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+
+  function restoreDocument(file) {
+    if (!file) { return; }
+    if (!docState.sessionId) { toast("Redact a document first.", true); return; }
+    var problem = checkFile(file);
+    if (problem) { toast(problem, true); return; }
+
+    readAsBase64(file).then(function (base64) {
+      return api("/api/documents/restore", {
+        filename: file.name,
+        content_base64: base64,
+        session_id: docState.sessionId
+      });
+    }).then(function (data) {
+      downloadBase64(data.content_base64, data.filename, data.media_type);
+      $("restore-summary").textContent = data.tokens_restored + " of " + data.tokens_total
+        + " tokens restored • downloaded " + data.filename;
+      toast("Restored copy downloaded");
+    }).catch(function (err) {
+      toast(err.message, true);
+    }).finally(function () {
+      $("doc-restore-file").value = "";
+    });
+  }
+
+  /* A drop zone is a <label> around a hidden file input, so a click browses. This adds
+     keyboard access and drag-and-drop. */
+  function bindDropZone(zone, input, onFile) {
+    zone.tabIndex = 0;
+    zone.setAttribute("role", "button");
+    zone.addEventListener("keydown", function (event) {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); input.click(); }
+    });
+    input.addEventListener("change", function () { onFile(input.files[0]); });
+    zone.addEventListener("dragover", function (event) {
+      event.preventDefault();
+      zone.classList.add("is-dragover");
+    });
+    zone.addEventListener("dragleave", function () { zone.classList.remove("is-dragover"); });
+    zone.addEventListener("drop", function (event) {
+      event.preventDefault();
+      zone.classList.remove("is-dragover");
+      onFile(event.dataTransfer.files[0]);
+    });
+  }
+
+  function initDocuments(config) {
+    var types = config.document_types || [];
+    $("doc-types").textContent = types.join(" ") + " · up to " + formatBytes(config.max_document_bytes);
+    $("doc-file").accept = types.join(",");
+    $("doc-restore-file").accept = types.concat([".txt"]).join(",");
+
+    bindDropZone($("doc-drop"), $("doc-file"), chooseDocument);
+    bindDropZone($("doc-restore-drop"), $("doc-restore-file"), restoreDocument);
+
+    // A file dropped just beside a drop zone would otherwise replace the whole page. Only
+    // files: dragging text into the prompt must keep working.
+    ["dragover", "drop"].forEach(function (name) {
+      window.addEventListener(name, function (event) {
+        var types = event.dataTransfer && event.dataTransfer.types;
+        if (types && Array.prototype.indexOf.call(types, "Files") !== -1) { event.preventDefault(); }
+      });
+    });
+
+    $("tab-text").addEventListener("click", function () { setMode("text"); });
+    $("tab-doc").addEventListener("click", function () { setMode("doc"); });
+    $("btn-doc-remove").addEventListener("click", removeDocument);
+    $("btn-doc-redact").addEventListener("click", redactDocument);
+    $("btn-doc-again").addEventListener("click", redactDocument);
+    $("btn-doc-download").addEventListener("click", function () {
+      var data = docState.result;
+      if (data) { downloadBase64(data.content_base64, data.filename, data.media_type); }
+    });
+
+    var saved = null;
+    try { saved = window.sessionStorage.getItem(TAB_STORAGE); } catch (err) { /* default tab */ }
+    if (saved === "doc") { setMode("doc"); }
+  }
+
   /* --- wiring --------------------------------------------------------------- */
 
   function onPromptChanged() {
@@ -1338,24 +1657,30 @@
     $("btn-clear-sessions").addEventListener("click", function () {
       // Drops this page's own mapping, not the whole instance's. Clearing every
       // client's mappings is an operator action and needs the admin key.
+      // Both tabs' sessions: the text prompt's and the document's.
       function forgetLocally() {
         state.sessionId = null;
+        state.textMapping = {};
+        docState.sessionId = null;
+        if (docState.result) { docState.result.mapping = {}; }
         $("btn-restore").disabled = true;
         renderMapping({});
       }
 
-      if (!state.sessionId) {
+      var ids = [state.sessionId, docState.sessionId].filter(Boolean);
+      if (!ids.length) {
         forgetLocally();
         toast("Nothing stored to clear");
         return;
       }
 
-      api("/api/sessions/" + encodeURIComponent(state.sessionId), null, "DELETE")
-        .then(function (data) {
-          forgetLocally();
-          toast("Cleared " + data.cleared + " stored mapping(s)");
-        })
-        .catch(function (err) { toast(err.message, true); });
+      Promise.all(ids.map(function (id) {
+        return api("/api/sessions/" + encodeURIComponent(id), null, "DELETE");
+      })).then(function (responses) {
+        var cleared = responses.reduce(function (sum, data) { return sum + data.cleared; }, 0);
+        forgetLocally();
+        toast("Cleared " + cleared + " stored mapping(s)");
+      }).catch(function (err) { toast(err.message, true); });
     });
 
     $("btn-auth-save").addEventListener("click", saveKeyFromInput);
@@ -1405,6 +1730,7 @@
     renderRecognizers();
     bindEvents();
     initDictation();
+    initDocuments(config);
     $("threshold-value").value = state.threshold.toFixed(2);
   }).catch(function (err) {
     status($("engine-status"), "Failed to load", "err");
