@@ -18,7 +18,16 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from presidio_anonymizer.entities import InvalidParamError
 
-from . import documents, engines, operators, policy, recognizers, redaction, schemas
+from . import (
+    documents,
+    engines,
+    operators,
+    policy,
+    recognizers,
+    redaction,
+    schemas,
+    suggestions,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("prompt_redaction")
@@ -405,13 +414,10 @@ def post_document_redact(request: schemas.DocumentRedactRequest) -> Dict[str, An
     except documents.DocumentError as exc:
         raise _http_error(exc)
 
-    changed = [
-        {"label": document.labels[i], "text": new}
-        for i, (old, new) in enumerate(zip(document.segments, result["segments"]))
-        if old != new
-    ]
+    changed = sum(1 for old, new in zip(document.segments, result["segments"]) if old != new)
     for finding in result["findings"]:
         finding["location"] = document.labels[finding.pop("segment")]
+    suggested, suggested_total = suggestions.suggest_terms(result["segments"])
 
     return {
         "session_id": result["session_id"],
@@ -424,8 +430,9 @@ def post_document_redact(request: schemas.DocumentRedactRequest) -> Dict[str, An
         "operators_applied": result["operators_applied"],
         "reversible": result["reversible"],
         "engine": request.engine,
-        "segments": changed,
-        "segments_changed": len(changed),
+        "segments_changed": changed,
+        "suggestions": suggested,
+        "suggestions_total": suggested_total,
         "warnings": document.warnings,
     }
 

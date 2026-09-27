@@ -137,7 +137,7 @@ your prompt anywhere — Presidio runs locally, and no LLM is called.
 ## Documents
 
 The **Document** tab redacts a whole file with the same options as a prompt. Drop in a
-file, click **Redact document**, check the preview, and download the redacted copy. Give that
+file, click **Redact document**, review the words left over, and download the redacted copy. Give that
 copy to a model. Paste the model's reply into the restore box to get the real values back.
 If the model edited the file and handed it back, drop that file into the restore area
 instead.
@@ -158,8 +158,20 @@ recognise "Marcus Testwell" in a sentence and still miss the same name standing 
 a `customer_name` column, so every whole-word copy of a detected value is redacted with the
 same token. Those findings show "Same value found elsewhere in the document" as their
 recognizer. Dates are the exception: finding "May" once does not redact every "May" in the
-file. A name the model never recognises anywhere is still missed. Check the preview, and
-use a deny-list recognizer for names that must never get through.
+file. A name the model never recognises anywhere is still missed, and that is what the
+next list is for.
+
+**Anything else to redact?** lists every distinct word still in the redacted file, with the
+most likely ones first: capitalised words and words with digits, then the most frequent.
+Articles, auxiliary verbs, prepositions, conjunctions and pronouns are left out, since they
+can never be personal data. Tick any word the model missed, or type a word or phrase into
+the box below the list, such as "Elena Sample". Pick what to redact it as, and press
+**Redact selected**. The document is redacted again with those terms added, and they drop
+off the list.
+
+These marks work like the right-click marks on a prompt. They become a deny-list recognizer
+under **Custom recognizers**, so they match whole words in any case, and they apply to
+prompts in the Text tab as well.
 
 The file is also cleaned in ways you would not see in Word or Excel:
 - The author, last editor, company and manager fields are blanked.
@@ -380,8 +392,9 @@ that fired, and an `explanation` when you asked for one. Restore responses carry
 The document routes take the file as `content_base64` next to `filename`, whose extension
 picks the format. `POST /api/documents/redact` accepts every option `/api/redact` does,
 and returns the redacted file as `content_base64`, a `filename` for it, `findings` with a
-`location` each, the token `mapping`, the changed `segments` for a preview, and
-`warnings`. Its `session_id` works with `/api/restore` as well, for a reply about the
+`location` each, the token `mapping`, `warnings`, and `suggestions`. Each suggestion is a
+`{term, count}` for a word left in the redacted file, capped at 300, with the full count in
+`suggestions_total`. Its `session_id` works with `/api/restore` as well, for a reply about the
 document. See [Documents](#documents).
 
 A worked round trip with real request and response bodies is in the
@@ -405,6 +418,7 @@ app/
   recognizers.py  ad-hoc regex / deny-list recognizers
   redaction.py    analyze -> anonymize -> restore, plus the TTL session store
   documents.py    DOCX / XLSX / PDF / text in and out, as labelled text segments
+  suggestions.py  words left after redaction, minus grammatical words, to review
   policy.py       central IT-defined redaction policy, from REDACTION_POLICY_FILE
   schemas.py      pydantic request/response models
   static/         index.html, styles.css, app.js  (no build step)
@@ -427,7 +441,7 @@ entity types.
 ## Tests
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests\ -v     # 94 backend tests
+.\.venv\Scripts\python.exe -m pytest tests\ -v     # 121 backend tests
 dotnet test tray.Tests                             # 25 desktop client tests
 ```
 

@@ -292,12 +292,6 @@
 
       tr.appendChild(tdEntity);
       tr.appendChild(tdText);
-      if (state.mode === "doc") {
-        var tdWhere = document.createElement("td");
-        tdWhere.className = "where";
-        tdWhere.textContent = finding.location || "";
-        tr.appendChild(tdWhere);
-      }
       tr.appendChild(tdScore);
       tr.title = buildTooltip(finding);
       tbody.appendChild(tr);
@@ -1104,7 +1098,9 @@
 
   /* One auto-managed deny-list recognizer per label, so marking three names as PERSON
      produces one card holding three terms rather than three cards. */
-  function markTerm(term, label) {
+  /* Add terms to the deny-list recognizer for `label`, creating it if needed. Shared by
+     the right-click menu and the document tab's suggestions. Returns how many were new. */
+  function addDenyTerms(terms, label) {
     var entity = slugifyEntity(label);
     var existing = null;
     state.recognizers.forEach(function (recognizer) {
@@ -1118,18 +1114,26 @@
       state.recognizers.push(existing);
     }
 
-    var lower = term.toLowerCase();
-    var already = (existing.deny_list || []).some(function (marked) {
-      return marked.toLowerCase() === lower;    // the matching is case-insensitive too
+    var added = 0;
+    terms.forEach(function (term) {
+      var lower = term.toLowerCase();
+      var already = (existing.deny_list || []).some(function (marked) {
+        return marked.toLowerCase() === lower;    // the matching is case-insensitive too
+      });
+      if (!already) { existing.deny_list.push(term); added++; }
     });
-    if (already) { toast("Already marked as " + entity); return; }
+    if (added) { renderRecognizers(); }
+    return added;
+  }
 
-    existing.deny_list.push(term);
+  function markTerm(term, label) {
+    var entity = slugifyEntity(label);
+    if (!addDenyTerms([term], label)) { toast("Already marked as " + entity); return; }
+
     if (!recognizersRevealed) {
       recognizersRevealed = true;
       reveal($("recognizer-list"));   // show the user where the term landed, once
     }
-    renderRecognizers();
     analyze();
     toast("Marked “" + term + "” as " + entity);
   }
@@ -1297,8 +1301,6 @@
 
   var TAB_STORAGE = "prs.tab";
   var docState = { file: null, base64: null, result: null, sessionId: null };
-  var TOKEN_RE = /<([A-Z][A-Z0-9_]*)_(\d+)>/g;
-  var PREVIEW_LIMIT = 200;
 
   function currentSessionId() {
     return state.mode === "doc" ? docState.sessionId : state.sessionId;
@@ -1323,7 +1325,6 @@
     $("pane-text").hidden = isDoc;
     $("pane-doc").hidden = !isDoc;
     $("doc-restore").hidden = !isDoc;
-    $("findings-where").hidden = !isDoc;
     $("btn-restore").disabled = !currentSessionId();
     $("reply").value = "";
     $("restored").value = "";
@@ -1454,51 +1455,104 @@
       warnings.appendChild(p);
     });
 
-    var list = $("doc-preview");
-    list.innerHTML = "";
-    if (!data.segments.length) {
-      var empty = document.createElement("div");
-      empty.className = "empty";
-      empty.textContent = "Nothing in the file was changed.";
-      list.appendChild(empty);
-    }
-    data.segments.slice(0, PREVIEW_LIMIT).forEach(function (segment) {
-      var row = document.createElement("div");
-      row.className = "segment";
-      var label = document.createElement("span");
-      label.className = "segment-label";
-      label.textContent = segment.label;
-      var text = document.createElement("div");
-      text.className = "segment-text mono";
-      appendWithTokens(text, segment.text);
-      row.appendChild(label);
-      row.appendChild(text);
-      list.appendChild(row);
-    });
-    if (data.segments.length > PREVIEW_LIMIT) {
-      var more = document.createElement("p");
-      more.className = "hint";
-      more.textContent = "…and " + (data.segments.length - PREVIEW_LIMIT) + " more changed parts in the download.";
-      list.appendChild(more);
-    }
+    renderSuggestions(data);
     $("doc-result").hidden = false;
   }
 
-  /* Text nodes plus a coloured tag per token -- never innerHTML, since this is file content. */
-  function appendWithTokens(container, text) {
-    var cursor = 0;
-    var match;
-    TOKEN_RE.lastIndex = 0;
-    while ((match = TOKEN_RE.exec(text)) !== null) {
-      container.appendChild(document.createTextNode(text.slice(cursor, match.index)));
-      var tag = document.createElement("span");
-      tag.className = "tag";
-      tag.setAttribute("style", entityStyle(match[1]));
-      tag.textContent = match[0];
-      container.appendChild(tag);
-      cursor = match.index + match[0].length;
+  /* --- suggestions: words the model left, for the user to redact ------------- */
+  /* The server lists what is still in the redacted file, minus articles, auxiliaries,
+     prepositions, conjunctions and pronouns. Ticking words (or typing a phrase) marks
+     them exactly as the right-click menu does -- a deny-list recognizer per label -- and
+     redacts the document again, so they drop off the list. */
+
+  function renderSuggestions(data) {
+    var box = $("doc-suggestions");
+    box.innerHTML = "";
+    var shown = data.suggestions.length;
+    var total = data.suggestions_total;
+    $("suggest-counter").textContent = total
+      ? "(" + (shown < total ? shown + " of " + total : total) + " words)"
+      : "";
+    $("suggest-filter").value = "";
+
+    if (!shown) {
+      var empty = document.createElement("div");
+      empty.className = "empty";
+      empty.textContent = "No words left to review.";
+      box.appendChild(empty);
     }
-    container.appendChild(document.createTextNode(text.slice(cursor)));
+    data.suggestions.forEach(function (suggestion) {
+      // DOM nodes and textContent only: these are words from the user's file.
+      var chip = document.createElement("label");
+      chip.className = "chip";
+      chip.dataset.term = suggestion.term.toLowerCase();
+      var tick = document.createElement("input");
+      tick.type = "checkbox";
+      tick.value = suggestion.term;
+      tick.addEventListener("change", function () {
+        chip.classList.toggle("is-checked", tick.checked);
+        updateSuggestButton();
+      });
+      var word = document.createElement("span");
+      word.textContent = suggestion.term;
+      chip.appendChild(tick);
+      chip.appendChild(word);
+      if (suggestion.count > 1) {
+        var count = document.createElement("span");
+        count.className = "chip-count";
+        count.textContent = "×" + suggestion.count;
+        chip.appendChild(count);
+      }
+      box.appendChild(chip);
+    });
+
+    var select = $("suggest-entity");
+    var previous = select.value;
+    select.innerHTML = "";
+    markableEntities().forEach(function (entity) {
+      var option = document.createElement("option");
+      option.value = entity;
+      option.textContent = "as " + entity;
+      select.appendChild(option);
+    });
+    var entities = markableEntities();
+    select.value = entities.indexOf(previous) !== -1 ? previous
+      : entities.indexOf("PERSON") !== -1 ? "PERSON" : entities[0];
+    updateSuggestButton();
+  }
+
+  function selectedSuggestions() {
+    var terms = Array.prototype.map.call(
+      $("doc-suggestions").querySelectorAll("input:checked"),
+      function (input) { return input.value; });
+    var custom = $("suggest-custom").value.trim();
+    if (custom) { terms.push(custom); }
+    return terms;
+  }
+
+  function updateSuggestButton() {
+    var count = selectedSuggestions().length;
+    var button = $("btn-suggest-redact");
+    button.disabled = count === 0;
+    button.textContent = count > 1 ? "Redact " + count + " selected" : "Redact selected";
+  }
+
+  function filterSuggestions() {
+    var needle = $("suggest-filter").value.trim().toLowerCase();
+    $("doc-suggestions").querySelectorAll(".chip").forEach(function (chip) {
+      chip.hidden = needle !== "" && chip.dataset.term.indexOf(needle) === -1;
+    });
+  }
+
+  function redactSuggestions() {
+    var terms = selectedSuggestions();
+    if (!terms.length) { return; }
+    var label = $("suggest-entity").value;
+    var added = addDenyTerms(terms, label);
+    $("suggest-custom").value = "";
+    if (!added) { toast("Already marked as " + slugifyEntity(label)); return; }
+    toast("Added " + added + " term" + (added === 1 ? "" : "s") + " as " + slugifyEntity(label));
+    redactDocument();
   }
 
   function downloadBase64(base64, filename, mediaType) {
@@ -1596,6 +1650,12 @@
       });
     });
 
+    $("suggest-filter").addEventListener("input", filterSuggestions);
+    $("suggest-custom").addEventListener("input", updateSuggestButton);
+    $("suggest-custom").addEventListener("keydown", function (event) {
+      if (event.key === "Enter") { event.preventDefault(); redactSuggestions(); }
+    });
+    $("btn-suggest-redact").addEventListener("click", redactSuggestions);
     $("btn-doc-remove").addEventListener("click", removeDocument);
     $("btn-doc-redact").addEventListener("click", redactDocument);
     $("btn-doc-again").addEventListener("click", redactDocument);

@@ -126,8 +126,9 @@ alongside it.
 ### A document
 
 1. Switch to the **Document** tab and drop in a file.
-2. Click **Redact document**. The preview shows every changed paragraph or cell, and where
-   it is in the file. Download the redacted copy.
+2. Click **Redact document**. Under **Anything else to redact?** you get every word still in
+   the redacted file, without the articles, prepositions and pronouns. Tick anything the
+   model missed, or type a phrase, and redact it too. Then download the redacted copy.
 3. Give it to a model. Paste the model's reply into the restore box. If the model edited the
    file and handed it back, drop that file in instead to get a copy with the real values.
 
@@ -226,7 +227,7 @@ It is not a statement that the code is free of bugs — see the note at the bott
 ## Tests
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests\ -v     # 94 backend tests
+.\.venv\Scripts\python.exe -m pytest tests\ -v     # 121 backend tests
 dotnet test tray.Tests                             # 25 desktop client tests
 ```
 

@@ -110,9 +110,9 @@ class RestoreResponse(BaseModel):
     not_found: List[str]
 
 
-class ChangedSegment(BaseModel):
-    label: str
-    text: str
+class Suggestion(BaseModel):
+    term: str
+    count: int
 
 
 class DocumentRedactResponse(BaseModel):
@@ -128,8 +128,10 @@ class DocumentRedactResponse(BaseModel):
     operators_applied: Dict[str, str]
     reversible: bool
     engine: str
-    segments: List[ChangedSegment]  # changed segments only, redacted, for a preview
     segments_changed: int
+    # Words still in the redacted file, minus grammatical words, for the user to review.
+    suggestions: List[Suggestion]
+    suggestions_total: int
     warnings: List[str]
 
 

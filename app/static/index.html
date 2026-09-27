@@ -178,10 +178,19 @@
         </div>
         <div id="doc-warnings"></div>
 
+        <!-- Words still in the redacted file, for catching what the model missed. -->
         <div class="panel-head">
-          <h2 class="panel-title">Preview <span class="counter">changed parts only</span></h2>
+          <h2 class="panel-title">Anything else to redact? <span class="counter" id="suggest-counter"></span></h2>
+          <input type="text" id="suggest-filter" class="suggest-filter" placeholder="Filter words&hellip;" aria-label="Filter suggested words">
         </div>
-        <div class="segment-list" id="doc-preview"></div>
+        <div class="suggestions" id="doc-suggestions" role="group" aria-label="Words left in the document"></div>
+        <div class="suggest-actions">
+          <input type="text" id="suggest-custom" placeholder="Add a word or phrase, e.g. Elena Sample" aria-label="Custom word or phrase to redact">
+          <select id="suggest-entity" aria-label="Redact as"></select>
+          <button type="button" class="btn btn-primary" id="btn-suggest-redact" disabled>Redact selected</button>
+        </div>
+        <p class="hint">Grammatical words are left out. A redacted word is matched whole and in any
+          case, and every copy of it in the document is redacted.</p>
       </div>
     </div>
 
@@ -221,7 +230,6 @@
           <tr>
             <th data-sort="entity_type">Entity</th>
             <th data-sort="text">Text</th>
-            <th data-sort="location" id="findings-where" hidden>Where</th>
             <th data-sort="score">Score</th>
           </tr>
         </thead>

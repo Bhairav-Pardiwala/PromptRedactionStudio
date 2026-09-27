@@ -103,13 +103,13 @@ def test_docx_hides_the_hyperlink_address_and_drops_tracked_deletions(client):
 
 
 def test_docx_reports_where_each_finding_sits(client):
-    body, _ = redact_file(client, "complaint.docx", build_docx())
+    body, out = redact_file(client, "complaint.docx", build_docx())
     locations = {f["location"] for f in body["findings"]}
 
     assert {"Paragraph 1", "Header 1", "Table 1 · R1C2", "Link address"} <= locations
-    labels = {segment["label"] for segment in body["segments"]}
-    assert "Paragraph 2" not in labels, "an unchanged paragraph was listed as changed"
-    assert body["segments_changed"] == len(body["segments"])
+    before = documents.open_document("a.docx", build_docx()).segments
+    after = documents.open_document("a.docx", out).segments
+    assert body["segments_changed"] == sum(1 for a, b in zip(before, after) if a != b)
 
 
 def test_docx_round_trip_restores_every_value(client):
@@ -330,6 +330,44 @@ def test_a_wider_copy_found_elsewhere_replaces_a_partial_detection():
         engine=ENGINE, entities=["NAME"], custom_recognizers=recognizers, store_session=False,
     )
     assert result["segments"] == ["<NAME_1> called", "<NAME_1> signed"]
+
+
+# --- suggestions ------------------------------------------------------------------------
+
+
+UNDETECTED_NAME_CSV = (
+    "ticket_id,customer_name,message\n"
+    "TKT-1003,Elena Sample,She says the card was declined and they would like a refund\n"
+)
+
+
+def test_words_the_model_missed_are_offered_as_suggestions(client):
+    # Only emails are looked for, so the name is certainly missed -- as spaCy missed it
+    # in the sample export.
+    body, _ = redact_file(
+        client, "t.csv", UNDETECTED_NAME_CSV.encode("utf-8"),
+        entities=["EMAIL_ADDRESS"], custom_recognizers=[],
+    )
+    terms = [s["term"] for s in body["suggestions"]]
+
+    assert {"Elena", "Sample", "TKT-1003"} <= set(terms)
+    assert not {"the", "was", "they", "and", "would", "She", "a"} & set(terms)
+    # Capitalised words and IDs lead the list.
+    assert terms.index("Elena") < terms.index("declined")
+    assert body["suggestions_total"] == len(terms)
+
+
+def test_redacting_a_suggestion_removes_it_everywhere(client):
+    mark = [{"name": "PERSON", "entity": "PERSON", "kind": "deny_list", "deny_list": ["Elena Sample"]}]
+    body, out = redact_file(
+        client, "t.csv", UNDETECTED_NAME_CSV.encode("utf-8"),
+        entities=["EMAIL_ADDRESS"], custom_recognizers=mark,
+    )
+    terms = {s["term"] for s in body["suggestions"]}
+
+    assert "Elena Sample" not in out.decode("utf-8")
+    assert "TKT-1003,<PERSON_1>," in out.decode("utf-8")
+    assert not {"Elena", "Sample"} & terms
 
 
 def _finding(text, entity_type, start=0):
